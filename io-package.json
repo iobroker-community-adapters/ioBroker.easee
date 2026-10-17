@@ -1,8 +1,21 @@
 {
   "common": {
     "name": "easee",
-    "version": "1.0.10",
+    "version": "2.0.0-alpha.0",
     "news": {
+      "2.0.0-alpha.0": {
+        "en": "Adapter has been migrated into the iobroker-community-adapter-organisation\nAdapter requires node.js >= 22 now.\nAdapter requires js-controller >= 7.2.2 now\nAdapter requires admin >= 7.7.22 now",
+        "de": "Adapter wurde in die Iobroker-Community-Adapter-Organisation migriert\nAdapter benötigt jetzt node.js >= 22.\nAdapter benötigt jetzt JS-Controller >= 7.2.2\nAdapter benötigt jetzt admin >= 7.7.22",
+        "ru": "Адаптер перенесен в организацию iobroker-community-adapter\nТеперь для адаптера требуется файл node.js >= 22.\nДля адаптера теперь требуется js-контроллер >= 7.2.2\nДля адаптера теперь требуется администратор >= 7.7.22",
+        "pt": "O adaptador foi migrado para o iobroker-community-adapter-organization\nO adaptador exige node.js >= 2.\nO adaptador exige js-controller >= 7.2.2\nAgora o adaptador exige admin >= 7.7.2",
+        "nl": "De adapter is gemigreerd naar de iobroker-community-adapter-organisatie\nVoor de adapter is nu node.js >= 22 nodig.\nVoor de adapter is nu een js-controller >= 7.2.2 vereist\nAdapter vereist nu admin >= 7.7.22",
+        "fr": "L'adaptateur a été migré vers l'organisation iobroker-community-adapter-organisation\nAdapter nécessite node.js >= 22.\nAdapter nécessite JS-Controller >= 7.2.2\nAdapter nécessite admin >= 7.7.22",
+        "it": "Adapter è stato migrato nella comunità iobroker di iobroker\nAdapter richiede node.js >= 2 ora.\nAdapter richiede js-controller >= 7.2.2 ora\nAdapter richiede admin >= 7.7.2 ora",
+        "es": "El adaptador se ha migrado a la organización iobroker-comunidad-adaptador\nEl adaptador necesita node.js >= 22 ahora.\nEl adaptador ahora requiere js-controller >= 7.2.2\nEl adaptador necesita admin >= 7.7.22 ahora",
+        "pl": "Adapter został przeniesiony do organizacji iobroker-community-adapter-organization\nAdapter wymaga teraz node.js >= 22.\nAdapter wymaga kontrolera js->= 7.2.2 teraz\nAdapter wymaga administratora >= 7.7.22 teraz",
+        "uk": "Адаптер перенесено в організацію адаптера спільноти iobroker\nТепер адаптер вимагає node.js >= 22.\nАдаптер вимагає js-контролера >= 7.2.2 зараз\nАдаптер вимагає адміністратора >= 7.7.22 зараз",
+        "zh-cn": "适配器已迁移到 iobroker 社区适配器组织\n适配器现在需要 node.js >= 22。\n适配器现在需要 js-controller >= 7.2.2\n适配器现在需要管理员 >= 7.7.22"
+      },
       "1.0.10": {
         "en": "fix version number",
         "de": "versionsnummer geändert",
