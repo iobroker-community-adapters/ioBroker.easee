@@ -38,7 +38,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 2.0.0-alpha.1 (2026-10-17)
 - (mcm1957) Adapter has been migrated into the iobroker-community-adapter-organisation
 - (iobroker-bot) Adapter requires node.js >= 22 now.
 - (copilot) Adapter requires js-controller >= 7.2.2 now
@@ -58,6 +58,7 @@ This adapter would not have been possible without the great work of @Newan (http
 
 ### 1.0.7
 * (Newan) Changed login URL
+
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 
