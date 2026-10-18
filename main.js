@@ -407,6 +407,7 @@ class Easee extends utils.Adapter {
     description,
     update,
     sequence,
+    requireCircuit = true,
   ) {
     if (this.unloading) {
       return;
@@ -414,18 +415,22 @@ class Easee extends utils.Adapter {
 
     try {
       const site = await this.getChargerSite(chargerId);
-      if (!site?.circuits?.[0]) {
+      if (!site || (requireCircuit && !site.circuits?.[0])) {
         this.log.warn(`Unable to update ${description}: site data missing`);
         return;
       }
-      const circuitKey = `${site.id}:${site.circuits[0].id}`;
-      const latestSequence =
-        this.circuitMaxCurrentByCircuit.get(circuitKey) || 0;
-      if (sequence < latestSequence) {
-        this.log.info(`Discarded superseded ${description} for ${circuitKey}`);
-        return;
+      if (requireCircuit) {
+        const circuitKey = `${site.id}:${site.circuits[0].id}`;
+        const latestSequence =
+          this.circuitMaxCurrentByCircuit.get(circuitKey) || 0;
+        if (sequence < latestSequence) {
+          this.log.info(
+            `Discarded superseded ${description} for ${circuitKey}`,
+          );
+          return;
+        }
+        this.circuitMaxCurrentByCircuit.set(circuitKey, sequence);
       }
-      this.circuitMaxCurrentByCircuit.set(circuitKey, sequence);
       await update(site);
     } catch (error) {
       if (!error?.retryDeferred || this.unloading) {
@@ -452,6 +457,7 @@ class Easee extends utils.Adapter {
           description,
           update,
           sequence,
+          requireCircuit,
         );
       }, delay);
       this.pendingSiteConfigRetries.set(retryKey, { timer });
@@ -630,12 +636,17 @@ class Easee extends utils.Adapter {
           if (this.unloading) {
             return;
           }
+          // Read the charging price configured for the site
+          const tmpChargerSite = await this.getChargerSite(charger.id);
+          if (this.unloading) {
+            return;
+          }
 
           //Setzen die Daten der Charger
           await this.setNewStatusToCharger(charger, tmpChargerState);
 
           //Setzen die Config zum Charger
-          await this.setConfigStatus(charger, tmpChargerConfig);
+          await this.setConfigStatus(charger, tmpChargerConfig, tmpChargerSite);
         } catch (error) {
           if (error?.retryDeferred) {
             continue;
@@ -956,6 +967,39 @@ class Easee extends utils.Adapter {
                   );
                 });
             }, 500);
+          } else if (
+            tmpControl[4] == "costPerKwhExcludeVat" ||
+            tmpControl[4] == "vat"
+          ) {
+            const value = Number(state.val);
+            if (
+              !Number.isFinite(value) ||
+              value < 0 ||
+              (tmpControl[4] == "vat" && value >= 100)
+            ) {
+              this.log.error(`Invalid charging price value: ${state.val}`);
+              return;
+            }
+            this.updateSiteConfigWithRetry(
+              tmpControl[2],
+              id,
+              "Charging price update",
+              async (site) => {
+                const netPrice =
+                  tmpControl[4] == "costPerKwhExcludeVat"
+                    ? value
+                    : Number(site.costPerKwhExcludeVat);
+                const vat = tmpControl[4] == "vat" ? value : Number(site.vat);
+                await this.changeChargingPrice(
+                  tmpControl[2],
+                  site,
+                  netPrice,
+                  vat,
+                );
+              },
+              undefined,
+              false,
+            );
           } else {
             this.log.debug(`update config to API: ${id}`);
             if (tmpControl[4] == "isEnabled") {
@@ -1174,7 +1218,7 @@ class Easee extends utils.Adapter {
   }
 
   //Setzen alle Status für Config
-  async setConfigStatus(charger, charger_config) {
+  async setConfigStatus(charger, charger_config, charger_site) {
     await this.setStateAsync(`${charger.id}.config.isEnabled`, {
       val: charger_config.isEnabled,
       ack: true,
@@ -1199,6 +1243,42 @@ class Easee extends utils.Adapter {
       val: charger_config.maxChargerCurrent,
       ack: true,
     });
+
+    if (charger_site) {
+      if (typeof charger_site.costPerKWh === "number") {
+        await this.setStateAsync(`${charger.id}.config.costPerKWh`, {
+          val: charger_site.costPerKWh,
+          ack: true,
+        });
+      }
+      if (typeof charger_site.costPerKwhExcludeVat === "number") {
+        await this.setStateAsync(`${charger.id}.config.costPerKwhExcludeVat`, {
+          val: charger_site.costPerKwhExcludeVat,
+          ack: true,
+        });
+      }
+      if (typeof charger_site.vat === "number") {
+        await this.setStateAsync(`${charger.id}.config.vat`, {
+          val: charger_site.vat,
+          ack: true,
+        });
+      }
+
+      const currencyUnit =
+        typeof charger_site.currencyId === "string" && charger_site.currencyId
+          ? `${charger_site.currencyId}/kWh`
+          : undefined;
+      await this.extendObjectAsync(`${charger.id}.config.costPerKWh`, {
+        common: { unit: currencyUnit, write: false },
+      });
+      await this.extendObjectAsync(
+        `${charger.id}.config.costPerKwhExcludeVat`,
+        { common: { unit: currencyUnit, write: true } },
+      );
+      await this.extendObjectAsync(`${charger.id}.config.vat`, {
+        common: { unit: "%", write: true },
+      });
+    }
 
     //Values for sites
     await this.setStateAsync(`${charger.id}.config.circuitMaxCurrentP1`, {
@@ -1366,6 +1446,52 @@ class Easee extends utils.Adapter {
     this.log.debug(`Charger session ausgelesen mit id: ${charger_id}`);
     this.log.debug(JSON.stringify(response.data));
     return response.data;
+  }
+
+  async changeChargingPrice(charger_id, site, netPrice, vat) {
+    if (!site || site.id === undefined) {
+      throw new Error(`No site data available for charger ${charger_id}`);
+    }
+
+    const currencyId =
+      typeof site.currencyId === "string" ? site.currencyId : "";
+    if (!currencyId) {
+      throw new Error(`No currency available for site ${site.id}`);
+    }
+
+    if (
+      !Number.isFinite(netPrice) ||
+      netPrice < 0 ||
+      !Number.isFinite(vat) ||
+      vat < 0 ||
+      vat >= 100
+    ) {
+      throw new Error("Invalid net charging price or VAT");
+    }
+    const grossPrice = netPrice * (1 + vat / 100);
+    await axios.post(
+      `${apiUrl}/api/sites/${site.id}/price`,
+      {
+        currencyId,
+        costPerKWh: grossPrice,
+        vat,
+        costPerKwhExcludeVat: netPrice,
+      },
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    await this.setStateAsync(`${charger_id}.config.costPerKwhExcludeVat`, {
+      val: netPrice,
+      ack: true,
+    });
+    await this.setStateAsync(`${charger_id}.config.vat`, {
+      val: vat,
+      ack: true,
+    });
+    await this.setStateAsync(`${charger_id}.config.costPerKWh`, {
+      val: grossPrice,
+      ack: true,
+    });
+    this.log.info("Charging price update successful");
   }
 
   async startCharging(id) {
@@ -2110,6 +2236,48 @@ class Easee extends utils.Adapter {
 
   /*************** Config Reading ****************/
   async setAllConfigObjects(charger) {
+    await this.setObjectNotExistsAsync(`${charger.id}.config.costPerKWh`, {
+      type: "state",
+      common: {
+        name: "Charging price including VAT per kWh",
+        type: "number",
+        role: "value.price",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+
+    await this.setObjectNotExistsAsync(
+      `${charger.id}.config.costPerKwhExcludeVat`,
+      {
+        type: "state",
+        common: {
+          name: "Charging price excluding VAT per kWh",
+          type: "number",
+          role: "value.price",
+          read: true,
+          write: true,
+        },
+        native: {},
+      },
+    );
+    this.subscribeStates(`${charger.id}.config.costPerKwhExcludeVat`);
+
+    await this.setObjectNotExistsAsync(`${charger.id}.config.vat`, {
+      type: "state",
+      common: {
+        name: "Value added tax for charging price",
+        type: "number",
+        role: "value.tax",
+        read: true,
+        write: true,
+        unit: "%",
+      },
+      native: {},
+    });
+    this.subscribeStates(`${charger.id}.config.vat`);
+
     //isEnabled
     await this.setObjectNotExistsAsync(`${charger.id}.config.isEnabled`, {
       type: "state",
