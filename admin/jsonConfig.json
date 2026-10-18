@@ -120,6 +120,7 @@
             "hidden": "data.sessionPollMode !== 'manual' || !_states.chargerCount?.val || data.sessionPollInterval >= _states.chargerCount.val * 7"
         },
         "signalR": {
+            "newLine": true,
             "type": "checkbox",
             "xs": 12,
             "sm": 12,
