@@ -74,22 +74,40 @@
             "hidden": "data.sessionPollMode !== 'manual'"
         },
         "_sessionChargerCount": {
+            "newLine": true,
             "type": "state",
             "oid": "info.sessionPollChargerCount",
             "control": "text",
+            "xs": 12,
+            "sm": 8,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
             "label": "Detected chargers"
         },
         "_sessionRecommendedInterval": {
+            "newLine": true,
             "type": "state",
             "oid": "info.sessionPollRecommendedInterval",
             "control": "text",
+            "xs": 12,
+            "sm": 8,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
             "unit": "min",
             "label": "Recommended interval per charger"
         },
         "_sessionEffectiveInterval": {
+            "newLine": true,
             "type": "state",
             "oid": "info.sessionPollEffectiveInterval",
             "control": "text",
+            "xs": 12,
+            "sm": 8,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
             "unit": "min",
             "label": "Effective interval per charger"
         },
@@ -102,6 +120,7 @@
             "hidden": "data.sessionPollMode !== 'manual' || !_states.chargerCount?.val || data.sessionPollInterval >= _states.chargerCount.val * 7"
         },
         "signalR": {
+            "newLine": true,
             "type": "checkbox",
             "xs": 12,
             "sm": 12,
