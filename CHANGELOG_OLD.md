@@ -1,4 +1,7 @@
 # Older changes
+## 1.0.7
+* (Newan) Changed login URL
+
 ## 1.0.6
 * (Newan) Changed that smart charging is editable
 

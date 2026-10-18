@@ -40,7 +40,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 2.0.0 (2026-10-18)
 - (Voodoo2man) Improved charger status and connectivity handling with the Observations API, SignalR resilience, bounded polling, and API retries, incorporating contributions from @Voodoo2man, @Michaelnorge, @Codibris, and @m1chel87, with earlier Node.js and JSON-config groundwork from @NCIceWolf.
 - (Voodoo2man) Improved circuit-current update reliability and added configurable, rate-limit-aware session polling across chargers.
 - (Voodoo2man) Added configurable net charging prices and VAT with synchronized gross prices.
@@ -62,10 +62,6 @@ This adapter would not have been possible without the great work of @Newan (http
 
 ### 1.0.8 (2023-07-02)
 * (Newan)  small fixes
-
-### 1.0.7
-* (Newan) Changed login URL
-
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 
