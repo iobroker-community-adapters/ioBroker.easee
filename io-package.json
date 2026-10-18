@@ -129,6 +129,8 @@
     "username": "+49",
     "client_secret": "",
     "polltime": 30,
+    "sessionPollMode": "auto",
+    "sessionPollInterval": 60,
     "signalR": false,
     "logtype": false
   },
@@ -152,6 +154,44 @@
         "read": true,
         "write": false,
         "def": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "info.sessionPollChargerCount",
+      "type": "state",
+      "common": {
+        "name": "Detected chargers",
+        "type": "number",
+        "role": "value",
+        "read": true,
+        "write": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "info.sessionPollRecommendedInterval",
+      "type": "state",
+      "common": {
+        "name": "Recommended session interval per charger",
+        "type": "number",
+        "role": "value.interval",
+        "unit": "min",
+        "read": true,
+        "write": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "info.sessionPollEffectiveInterval",
+      "type": "state",
+      "common": {
+        "name": "Effective session interval per charger",
+        "type": "number",
+        "role": "value.interval",
+        "unit": "min",
+        "read": true,
+        "write": false
       },
       "native": {}
     }

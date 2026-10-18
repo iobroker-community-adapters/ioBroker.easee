@@ -47,6 +47,60 @@
             "label": "polltime",
             "help": "Poll interval in seconds"
         },
+        "_sessionPollingHeadline": {
+            "newLine": true,
+            "type": "header",
+            "size": 2,
+            "text": "Session polling"
+        },
+        "sessionPollMode": {
+            "type": "select",
+            "options": [
+                { "label": "Automatic", "value": "auto" },
+                { "label": "Manual", "value": "manual" }
+            ],
+            "default": "auto",
+            "label": "Session polling mode",
+            "help": "Automatic mode uses seven minutes per detected charger. Manual mode sets the desired interval per charger."
+        },
+        "sessionPollInterval": {
+            "type": "number",
+            "min": 7,
+            "step": 1,
+            "unit": "min",
+            "default": 60,
+            "label": "Manual session interval per charger",
+            "help": "Intervals below the recommendation are conservatively clamped to the recommendation.",
+            "hidden": "data.sessionPollMode !== 'manual'"
+        },
+        "_sessionChargerCount": {
+            "type": "state",
+            "oid": "info.sessionPollChargerCount",
+            "control": "text",
+            "label": "Detected chargers"
+        },
+        "_sessionRecommendedInterval": {
+            "type": "state",
+            "oid": "info.sessionPollRecommendedInterval",
+            "control": "text",
+            "unit": "min",
+            "label": "Recommended interval per charger"
+        },
+        "_sessionEffectiveInterval": {
+            "type": "state",
+            "oid": "info.sessionPollEffectiveInterval",
+            "control": "text",
+            "unit": "min",
+            "label": "Effective interval per charger"
+        },
+        "_sessionIntervalWarning": {
+            "type": "infoBox",
+            "boxType": "warning",
+            "closeable": false,
+            "text": "The configured interval is below the recommendation and will be clamped.",
+            "dependsOnStates": { "chargerCount": ".info.sessionPollChargerCount" },
+            "hidden": "data.sessionPollMode !== 'manual' || !_states.chargerCount?.val || data.sessionPollInterval >= _states.chargerCount.val * 7"
+        },
         "signalR": {
             "type": "checkbox",
             "xs": 12,

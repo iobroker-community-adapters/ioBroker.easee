@@ -29,6 +29,8 @@ chargerOpMode =
 
 dynamicCircuitCurrentPX -> All phases must be set within 500ms (script) otherwise the phase will be set to 0.    
 
+Session polling can run automatically at a recommended interval of seven minutes per detected charger, or use a manually selected interval per charger. The Admin configuration shows the detected charger count, recommendation, and effective interval. Manual values below the recommendation are raised automatically to preserve the API rate limit. The last session request time is retained across adapter restarts.
+
 ## Credits
 
 This adapter would not have been possible without the great work of @Newan (https://github.com/Newan), who developed former releases of this adapter.
@@ -38,6 +40,10 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (@Voodoo2man) Improved charger status and connectivity handling with the Observations API, SignalR resilience, bounded polling, and API retries, incorporating contributions from @Voodoo2man, @Michaelnorge, @Codibris, and @m1chel87, with earlier Node.js and JSON-config groundwork from @NCIceWolf.
+- (@Voodoo2man) Improved circuit-current update reliability and added configurable, rate-limit-aware session polling across chargers.
+
 ### 2.0.0-alpha.1 (2026-10-17)
 - (mcm1957) Adapter has been migrated into the iobroker-community-adapter-organisation
 - (iobroker-bot) Adapter requires node.js >= 22 now.
