@@ -5,23 +5,63 @@ const utils = require("@iobroker/adapter-core");
 const axios = require("axios").default;
 const signalR = require("@microsoft/signalr");
 const objEnum = require("./lib/enum.js");
+const AxiosSignalRHttpClient = require("./lib/signalr-http-client.js");
+const {
+  CHARGER_STATE_OBSERVATION_IDS,
+  observationsToChargerState,
+} = require("./lib/observations.js");
 
 //Eigene Variablen
 const apiUrl = "https://api.easee.com";
+const apiRequestTimeout = 30000;
+const sessionRequestInterval = 7 * 60 * 1000;
+const defaultSessionPollInterval = 60;
 const adapterIntervals = {}; //halten von allen Intervallen
 let accessToken = "";
 let refreshToken = "";
 let expireTime = Date.now();
 let polltime = 30;
 let logtype = false;
-const minPollTimeEnergy = 120;
-let roundCounter = 0;
+const tokenRefreshMarginSeconds = 60;
 const arrCharger = [];
 
-//Variable für dynamicCircuitCurrentPX
-let dynamicCircuitCurrentP1 = 0;
-let dynamicCircuitCurrentP2 = 0;
-let dynamicCircuitCurrentP3 = 0;
+function getRateLimitDelay(error) {
+  const headers = error?.response?.headers;
+  const header = (name) =>
+    headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.toLowerCase()];
+  const retryAfter = header("retry-after");
+  if (retryAfter !== undefined) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) {
+      return Math.max(0, seconds * 1000);
+    }
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) {
+      return Math.max(0, retryAt - Date.now());
+    }
+  }
+
+  const remaining = Number(
+    header("ratelimit-remaining") ?? header("x-ratelimit-remaining"),
+  );
+  if (remaining === 0) {
+    const reset = Number(header("ratelimit-reset"));
+    if (Number.isFinite(reset)) {
+      return Math.max(0, reset * 1000);
+    }
+    const legacyReset = Number(header("x-ratelimit-reset"));
+    if (Number.isFinite(legacyReset)) {
+      const resetAt = legacyReset > 1e12 ? legacyReset : legacyReset * 1000;
+      return Math.max(0, resetAt - Date.now());
+    }
+  }
+
+  return error?.response?.status === 429 ? sessionRequestInterval : 0;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 
 class Easee extends utils.Adapter {
   constructor(options) {
@@ -32,17 +72,45 @@ class Easee extends utils.Adapter {
     this.on("ready", this.onReady.bind(this));
     this.on("stateChange", this.onStateChange.bind(this));
     this.on("unload", this.onUnload.bind(this));
+    this.signalRConnection = null;
+    this.signalRSubscribedChargers = new Set();
+    this.signalRSubscriptionPromises = new Map();
+    this.signalRSubscriptionPromises = new Map();
+    this.unloading = false;
+    this.apiRetryState = new Map();
+    this.pendingSiteConfigRetries = new Map();
+    this.dynamicCircuitCurrentByCharger = new Map();
+    this.dynamicCircuitCurrentByCircuit = new Map();
+    this.dynamicCircuitCurrentSequence = 0;
+    this.circuitMaxCurrentByCircuit = new Map();
+    this.circuitMaxCurrentSequence = 0;
+    this.sessionChargers = [];
+    this.sessionCursor = 0;
+    this.sessionPollTimer = null;
+    this.sessionInFlight = null;
+    this.sessionAbortController = null;
+    this.sessionLastRequestAt = null;
+    this.sessionRetryAt = 0;
+    this.sessionPollMode = "auto";
+    this.sessionManualInterval = defaultSessionPollInterval;
   }
   /**
    * SignalR
    */
-  startSignal() {
+  async startSignal() {
+    if (this.unloading || this.signalRConnection !== null) {
+      return;
+    }
     const connection = new signalR.HubConnectionBuilder()
       .withUrl("https://streams.easee.com/hubs/chargers", {
         accessTokenFactory: () => accessToken,
+        httpClient: new AxiosSignalRHttpClient(),
+        skipNegotiation: true,
+        transport: signalR.HttpTransportType.WebSockets,
       })
       .withAutomaticReconnect()
       .build();
+    this.signalRConnection = connection;
 
     connection.on("ProductUpdate", (data) => {
       //haben einen neuen Wert über SignalR erhalten
@@ -68,24 +136,90 @@ class Easee extends utils.Adapter {
             break;
           //case 6: JSON
         }
-        this.setStateAsync(tmpValueId, { val: data.value, ack: true });
+        this.setStateAsync(tmpValueId, { val: data.value, ack: true }).catch(
+          (error) =>
+            this.log.warn(
+              `SignalR state update failed: ${errorMessage(error)}`,
+            ),
+        );
       }
     });
 
-    connection.start().then(() => {
-      //for each charger subscribe SignalR
-      arrCharger.forEach((charger_id) => {
-        connection
-          .send(`SubscribeWithCurrentState`, charger_id, true)
-          .then(() => {
-            this.log.info(`Charger registrate in SignalR: ${charger_id}`);
-          });
+    connection.onclose((error) => {
+      if (this.signalRConnection === connection) {
+        this.signalRConnection = null;
+      }
+      if (!this.unloading) {
+        this.log.warn(
+          `SignalR connection closed: ${errorMessage(error || "unknown reason")}`,
+        );
+        this.scheduleSignalRReconnect();
+      }
+    });
+
+    try {
+      await connection.start();
+      this.signalRSubscribedChargers.clear();
+      for (const charger_id of arrCharger) {
+        await this.subscribeChargerToSignalR(charger_id);
+      }
+    } catch (error) {
+      if (this.signalRConnection === connection) {
+        this.signalRConnection = null;
+      }
+      this.log.warn(
+        `SignalR start failed; REST polling remains active: ${errorMessage(error)}`,
+      );
+      this.scheduleSignalRReconnect();
+    }
+  }
+
+  async subscribeChargerToSignalR(chargerId) {
+    const connection = this.signalRConnection;
+    if (
+      this.unloading ||
+      !connection ||
+      connection.state !== signalR.HubConnectionState.Connected ||
+      this.signalRSubscribedChargers.has(chargerId)
+    ) {
+      return;
+    }
+    const existingSubscription =
+      this.signalRSubscriptionPromises.get(chargerId);
+    if (existingSubscription) {
+      return existingSubscription;
+    }
+
+    const subscription = connection
+      .send("SubscribeWithCurrentState", chargerId, true)
+      .then(() => {
+        if (this.signalRConnection === connection && !this.unloading) {
+          this.signalRSubscribedChargers.add(chargerId);
+          this.log.info(`Charger registered in SignalR: ${chargerId}`);
+        }
+      })
+      .catch((error) => {
+        this.log.warn(
+          `SignalR subscription failed for charger ${chargerId}: ${errorMessage(error)}`,
+        );
+      })
+      .finally(() => {
+        if (this.signalRSubscriptionPromises.get(chargerId) === subscription) {
+          this.signalRSubscriptionPromises.delete(chargerId);
+        }
       });
-    });
-    connection.onclose(() => {
-      this.log.error("SignalR Verbindung beendet!!!- restart");
+    this.signalRSubscriptionPromises.set(chargerId, subscription);
+    return subscription;
+  }
+
+  scheduleSignalRReconnect() {
+    if (this.unloading) {
+      return;
+    }
+    clearTimeout(adapterIntervals.signalRReconnect);
+    adapterIntervals.signalRReconnect = setTimeout(() => {
       this.startSignal();
-    });
+    }, 30000);
   }
 
   /**
@@ -94,6 +228,26 @@ class Easee extends utils.Adapter {
   async onReady() {
     //initial Status melden
     await this.setStateAsync("info.connection", false, true);
+
+    this.configureSessionPolling();
+    await this.setObjectNotExistsAsync("info.sessionPollLastRequest", {
+      type: "state",
+      common: {
+        name: "Last session request",
+        type: "number",
+        role: "value.time",
+        unit: "ms",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+    const lastSessionRequest = await this.getStateAsync(
+      "info.sessionPollLastRequest",
+    );
+    if (Number.isFinite(lastSessionRequest?.val)) {
+      this.sessionLastRequestAt = lastSessionRequest.val;
+    }
 
     //Schauen ob die Polltime realistisch ist
     if (this.config.polltime < 1) {
@@ -128,39 +282,304 @@ class Easee extends utils.Adapter {
         });
 
         //reset all to start
-        this.arrCharger = [];
+        arrCharger.length = 0;
 
-        // starten den Statuszyklus der API neu
-        await this.readAllStates();
         if (this.config.signalR) {
           this.log.info("Starting SignalR");
           this.startSignal();
         }
+        // Start polling without delaying SignalR on a slow API response.
+        await this.readAllStates();
       }
+    }
+  }
+
+  configureSessionPolling() {
+    this.sessionPollMode =
+      this.config.sessionPollMode === "manual" ? "manual" : "auto";
+    const configuredInterval = Number(this.config.sessionPollInterval);
+    this.sessionManualInterval = Number.isFinite(configuredInterval)
+      ? Math.max(7, configuredInterval)
+      : defaultSessionPollInterval;
+    if (
+      this.sessionPollMode === "manual" &&
+      this.sessionManualInterval !== configuredInterval
+    ) {
+      this.log.warn(
+        "Manual session interval must be at least 7 minutes; using 7 minutes",
+      );
     }
   }
 
   // Clear all Timeouts and inform users
   onUnload(callback) {
+    this.unloading = true;
+    clearTimeout(adapterIntervals.readAllStates);
+    clearTimeout(this.sessionPollTimer);
+    this.sessionPollTimer = null;
+    this.sessionAbortController?.abort();
+    const sessionShutdown = this.sessionInFlight;
+    for (const chargerState of this.dynamicCircuitCurrentByCharger.values()) {
+      clearTimeout(chargerState.timer);
+      clearTimeout(chargerState.retryTimer);
+      chargerState.retryResolve?.();
+    }
+    this.dynamicCircuitCurrentByCharger.clear();
+    for (const circuitState of this.dynamicCircuitCurrentByCircuit.values()) {
+      clearTimeout(circuitState.timer);
+    }
+    this.dynamicCircuitCurrentByCircuit.clear();
+    clearTimeout(adapterIntervals.signalRReconnect);
+    for (const retry of this.pendingSiteConfigRetries.values()) {
+      clearTimeout(retry.timer);
+    }
+    this.pendingSiteConfigRetries.clear();
+    const signalRShutdown = Promise.resolve(
+      this.signalRConnection?.stop(),
+    ).catch((error) =>
+      this.log.warn(`Error stopping SignalR: ${errorMessage(error)}`),
+    );
+    const pendingSessionShutdown = Promise.resolve(sessionShutdown).catch(
+      (error) =>
+        this.log.warn(`Error stopping session polling: ${errorMessage(error)}`),
+    );
+    Promise.all([signalRShutdown, pendingSessionShutdown])
+      .then(() => this.setStateAsync("info.connection", false, true))
+      .catch((error) =>
+        this.log.error(`Error during unload: ${errorMessage(error)}`),
+      )
+      .finally(() => {
+        this.signalRConnection = null;
+        this.log.info("Adapter easee cleaned up everything...");
+        callback();
+      });
+  }
+
+  async requestWithBackoff(key, requestFn) {
+    let retryState = this.apiRetryState.get(key);
+    if (!retryState) {
+      retryState = { delay: 30000, retryAt: 0, inFlight: null };
+      this.apiRetryState.set(key, retryState);
+    }
+    if (retryState.inFlight) {
+      return retryState.inFlight;
+    }
+    if (retryState.retryAt > Date.now()) {
+      const error = new Error(`Retry deferred for ${key}`);
+      error.retryDeferred = true;
+      throw error;
+    }
+
+    retryState.inFlight = (async () => {
+      try {
+        const response = await requestFn();
+        this.apiRetryState.delete(key);
+        return response;
+      } catch (error) {
+        if (this.unloading) {
+          throw error;
+        }
+        const delay = Math.max(retryState.delay, getRateLimitDelay(error));
+        retryState.retryAt = Date.now() + delay;
+        if (key.startsWith("charger session ")) {
+          this.sessionRetryAt = Math.max(
+            this.sessionRetryAt,
+            retryState.retryAt,
+          );
+        }
+        retryState.delay = Math.min(Math.max(delay * 2, 30000), 300000);
+        this.log.warn(
+          `Easee API request failed for ${key}; retrying after ${Math.ceil(delay / 1000)} seconds: ${errorMessage(error)}`,
+        );
+        const retryError = new Error(errorMessage(error));
+        retryError.retryDeferred = true;
+        throw retryError;
+      } finally {
+        retryState.inFlight = null;
+      }
+    })();
+    return retryState.inFlight;
+  }
+
+  async updateSiteConfigWithRetry(
+    chargerId,
+    stateId,
+    description,
+    update,
+    sequence,
+  ) {
+    if (this.unloading) {
+      return;
+    }
+
     try {
-      clearTimeout(adapterIntervals.readAllStates);
-      clearTimeout(adapterIntervals.updateDynamicCircuitCurrent);
-      this.log.info("Adapter easee cleaned up everything...");
-      this.setStateAsync("info.connection", false, true)
-        .then(() => {
-          callback();
-        })
-        .catch((err) => {
-          this.log.error(`Error setting state: ${err}`);
-          callback();
-        });
+      const site = await this.getChargerSite(chargerId);
+      if (!site?.circuits?.[0]) {
+        this.log.warn(`Unable to update ${description}: site data missing`);
+        return;
+      }
+      const circuitKey = `${site.id}:${site.circuits[0].id}`;
+      const latestSequence =
+        this.circuitMaxCurrentByCircuit.get(circuitKey) || 0;
+      if (sequence < latestSequence) {
+        this.log.info(`Discarded superseded ${description} for ${circuitKey}`);
+        return;
+      }
+      this.circuitMaxCurrentByCircuit.set(circuitKey, sequence);
+      await update(site);
     } catch (error) {
-      this.log.error(`Error during unload: ${error}`);
-      callback();
+      if (!error?.retryDeferred || this.unloading) {
+        this.log.error(`${description} error: ${errorMessage(error)}`);
+        return;
+      }
+
+      const retryKey = `${chargerId}:${stateId}`;
+      const existingRetry = this.pendingSiteConfigRetries.get(retryKey);
+      if (existingRetry) {
+        clearTimeout(existingRetry.timer);
+      }
+
+      const siteRetry = this.apiRetryState.get(`charger site ${chargerId}`);
+      const delay = Math.max(
+        0,
+        (siteRetry?.retryAt || Date.now()) - Date.now(),
+      );
+      const timer = setTimeout(() => {
+        this.pendingSiteConfigRetries.delete(retryKey);
+        this.updateSiteConfigWithRetry(
+          chargerId,
+          stateId,
+          description,
+          update,
+          sequence,
+        );
+      }, delay);
+      this.pendingSiteConfigRetries.set(retryKey, { timer });
+      this.log.info(
+        `${description} queued for retry in ${Math.ceil(delay / 1000)} seconds`,
+      );
     }
   }
+
+  async updateDynamicCircuitWithRetry(
+    chargerId,
+    chargerState,
+    changedValues,
+    phaseSequences,
+  ) {
+    while (!this.unloading) {
+      if (
+        Object.entries(phaseSequences).some(
+          ([phase, sequence]) =>
+            chargerState.latestSequences[phase] !== sequence,
+        )
+      ) {
+        this.log.info(
+          `Discarded superseded Dynamic circuit current update for ${chargerId}`,
+        );
+        return;
+      }
+      try {
+        const site = await this.getChargerSite(chargerId);
+        if (!site?.circuits?.[0]) {
+          this.log.warn(
+            "Unable to update Dynamic circuit current: site data missing",
+          );
+          return;
+        }
+
+        if (
+          Object.entries(phaseSequences).some(
+            ([phase, sequence]) =>
+              chargerState.latestSequences[phase] !== sequence,
+          )
+        ) {
+          this.log.info(
+            `Discarded superseded Dynamic circuit current update for ${chargerId}`,
+          );
+          return;
+        }
+
+        const circuitId = site.circuits[0].id;
+        const circuitKey = `${site.id}:${circuitId}`;
+        let circuitState = this.dynamicCircuitCurrentByCircuit.get(circuitKey);
+        if (!circuitState) {
+          circuitState = {
+            values: { p1: 0, p2: 0, p3: 0 },
+            phaseSequences: { p1: 0, p2: 0, p3: 0 },
+            timer: null,
+            queue: Promise.resolve(),
+          };
+          this.dynamicCircuitCurrentByCircuit.set(circuitKey, circuitState);
+        }
+        let updated = false;
+        for (const [phase, value] of Object.entries(changedValues)) {
+          const sequence = phaseSequences[phase];
+          if (sequence >= circuitState.phaseSequences[phase]) {
+            circuitState.values[phase] = value;
+            circuitState.phaseSequences[phase] = sequence;
+            updated = true;
+          }
+        }
+        if (!updated) {
+          this.log.info(
+            `Discarded superseded Dynamic circuit current update for ${circuitKey}`,
+          );
+          return;
+        }
+        if (circuitState.timer === null) {
+          circuitState.timer = setTimeout(() => {
+            circuitState.timer = null;
+            const currentValues = { ...circuitState.values };
+            circuitState.values = { p1: 0, p2: 0, p3: 0 };
+            circuitState.queue = circuitState.queue
+              .catch((error) => {
+                this.log.error(
+                  `Previous circuit current update failed: ${errorMessage(error)}`,
+                );
+              })
+              .then(() => {
+                if (this.unloading) {
+                  return;
+                }
+                return this.changeCircuitConfig(
+                  site.id,
+                  circuitId,
+                  currentValues,
+                );
+              });
+          }, 500);
+        }
+        return;
+      } catch (error) {
+        if (!error?.retryDeferred || this.unloading) {
+          this.log.error(
+            `Dynamic circuit current update error: ${errorMessage(error)}`,
+          );
+          return;
+        }
+
+        const siteRetry = this.apiRetryState.get(`charger site ${chargerId}`);
+        const delay = Math.max(
+          0,
+          (siteRetry?.retryAt || Date.now()) - Date.now(),
+        );
+        await new Promise((resolve) => {
+          chargerState.retryResolve = resolve;
+          chargerState.retryTimer = setTimeout(resolve, delay);
+        });
+        chargerState.retryResolve = null;
+        chargerState.retryTimer = null;
+      }
+    }
+  }
+
   /*****************************************************************************************/
   async readAllStates() {
+    if (this.unloading) {
+      return;
+    }
+
     if (expireTime <= Date.now()) {
       //Token ist expired!
       if (logtype) {
@@ -168,12 +587,22 @@ class Easee extends utils.Adapter {
       }
       await this.refreshToken();
     }
+    if (this.unloading) {
+      return;
+    }
     this.log.debug("read new states from the API");
 
     //Lesen alle Charger aus
     const tmpAllChargers = await this.getAllCharger();
+    if (this.unloading) {
+      return;
+    }
     if (tmpAllChargers != undefined) {
-      tmpAllChargers.forEach(async (charger) => {
+      this.updateSessionChargers(tmpAllChargers);
+      for (const charger of tmpAllChargers) {
+        if (this.unloading) {
+          return;
+        }
         //Prüfen ob wir das Object kennen
         if (!arrCharger.includes(charger.id)) {
           //setzen als erstes alle Objekte
@@ -183,47 +612,48 @@ class Easee extends utils.Adapter {
           //merken uns den charger
           arrCharger.push(charger.id);
         }
+        await this.subscribeChargerToSignalR(charger.id);
+        if (this.unloading) {
+          return;
+        }
 
         this.log.debug("Charger found");
         this.log.debug(JSON.stringify(charger));
         try {
           //Lesen den Status aus
           const tmpChargerState = await this.getChargerState(charger.id);
+          if (this.unloading) {
+            return;
+          }
           //Lesen die config
           const tmpChargerConfig = await this.getChargerConfig(charger.id);
+          if (this.unloading) {
+            return;
+          }
 
           //Setzen die Daten der Charger
           await this.setNewStatusToCharger(charger, tmpChargerState);
 
           //Setzen die Config zum Charger
           await this.setConfigStatus(charger, tmpChargerConfig);
-
-          //setzen und erechnen der Energiedaten, aber gebremste
-          if (roundCounter > minPollTimeEnergy / polltime) {
-            //lesen der Energiedaten
-            const tmpChargerSession = await this.getChargerSession(charger.id);
-            //setzen die Objekte
-            this.setNewSessionToCharger(charger, tmpChargerSession);
-          }
         } catch (error) {
+          if (error?.retryDeferred) {
+            continue;
+          }
           if (typeof error === "string") {
             this.log.error(error);
           } else if (error instanceof Error) {
             this.log.error(error.message);
           }
         }
-      });
+      }
     } else {
       this.log.warn("No Chargers found!");
     }
 
-    //Energiedaten dürfen nur einmal in der Minute aufgerufen werden, daher müssen wir das bremsen
-    if (roundCounter > minPollTimeEnergy / polltime) {
-      this.log.debug(`Hole Energiedaten: ${roundCounter}`);
-      roundCounter = 0;
+    if (this.unloading) {
+      return;
     }
-    //Zählen die Runde!
-    roundCounter = roundCounter + 1;
 
     //Melden das Update
     await this.setStateAsync(
@@ -231,10 +661,204 @@ class Easee extends utils.Adapter {
       new Date().toLocaleTimeString(),
       true,
     );
-    adapterIntervals.readAllStates = setTimeout(
-      this.readAllStates.bind(this),
-      polltime * 1000,
+    if (!this.unloading) {
+      adapterIntervals.readAllStates = setTimeout(
+        this.readAllStates.bind(this),
+        polltime * 1000,
+      );
+    }
+  }
+
+  updateSessionChargers(chargers) {
+    const nextCharger = this.sessionChargers[this.sessionCursor];
+    const previousChargers = this.sessionChargers;
+    this.sessionChargers = [
+      ...new Set((chargers || []).map((charger) => charger.id)),
+    ];
+    const changed =
+      previousChargers.length !== this.sessionChargers.length ||
+      previousChargers.some(
+        (chargerId, index) => chargerId !== this.sessionChargers[index],
+      );
+    this.sessionCursor = nextCharger
+      ? Math.max(this.sessionChargers.indexOf(nextCharger), 0)
+      : this.sessionCursor % Math.max(this.sessionChargers.length, 1);
+
+    this.updateSessionPollInfo().catch((error) => {
+      this.log.warn(
+        `Could not update session polling information: ${errorMessage(error)}`,
+      );
+    });
+
+    if (!this.sessionChargers.length) {
+      clearTimeout(this.sessionPollTimer);
+      this.sessionPollTimer = null;
+      return;
+    }
+    if (!this.sessionInFlight && (this.sessionPollTimer === null || changed)) {
+      const nextSlotDelay =
+        this.sessionLastRequestAt === null
+          ? 0
+          : Math.max(
+              0,
+              this.sessionLastRequestAt +
+                this.getSessionRequestInterval() -
+                Date.now(),
+            );
+      this.scheduleSessionPoll(nextSlotDelay);
+    }
+  }
+
+  async updateSessionPollInfo() {
+    const chargerCount = this.sessionChargers.length;
+    if (!chargerCount) {
+      return;
+    }
+    const recommendedInterval = chargerCount * 7;
+    const effectiveInterval =
+      this.sessionPollMode === "manual"
+        ? Math.max(recommendedInterval, this.sessionManualInterval)
+        : recommendedInterval;
+    await Promise.all([
+      this.setStateAsync("info.sessionPollChargerCount", chargerCount, true),
+      this.setStateAsync(
+        "info.sessionPollRecommendedInterval",
+        recommendedInterval,
+        true,
+      ),
+      this.setStateAsync(
+        "info.sessionPollEffectiveInterval",
+        effectiveInterval,
+        true,
+      ),
+    ]);
+  }
+
+  getSessionRequestInterval() {
+    const chargerCount = this.sessionChargers.length;
+    if (!chargerCount) {
+      return sessionRequestInterval;
+    }
+    const effectiveInterval =
+      this.sessionPollMode === "manual"
+        ? Math.max(chargerCount * 7, this.sessionManualInterval)
+        : chargerCount * 7;
+    return Math.max(
+      sessionRequestInterval,
+      (effectiveInterval * 60000) / chargerCount,
     );
+  }
+
+  scheduleSessionPoll(delay) {
+    if (
+      this.unloading ||
+      !this.sessionChargers.length ||
+      this.sessionInFlight
+    ) {
+      return;
+    }
+    clearTimeout(this.sessionPollTimer);
+    this.sessionPollTimer = setTimeout(() => {
+      this.sessionPollTimer = null;
+      this.pollNextSession().catch((error) => {
+        this.log.warn(`Session polling failed: ${errorMessage(error)}`);
+      });
+    }, delay);
+  }
+
+  async pollNextSession() {
+    if (
+      this.unloading ||
+      this.sessionInFlight ||
+      !this.sessionChargers.length
+    ) {
+      return;
+    }
+
+    const minRequestDelay =
+      this.sessionLastRequestAt === null
+        ? 0
+        : Math.max(
+            0,
+            this.sessionLastRequestAt +
+              this.getSessionRequestInterval() -
+              Date.now(),
+          );
+    if (minRequestDelay > 0) {
+      this.scheduleSessionPoll(minRequestDelay);
+      return;
+    }
+
+    const sharedRetryDelay = this.sessionRetryAt - Date.now();
+    if (sharedRetryDelay > 0) {
+      this.scheduleSessionPoll(Math.max(minRequestDelay, sharedRetryDelay));
+      return;
+    }
+
+    let selectedIndex = -1;
+    let earliestRetryAt = Infinity;
+    for (let offset = 0; offset < this.sessionChargers.length; offset++) {
+      const index = (this.sessionCursor + offset) % this.sessionChargers.length;
+      const chargerId = this.sessionChargers[index];
+      const retryAt =
+        this.apiRetryState.get(`charger session ${chargerId}`)?.retryAt || 0;
+      if (retryAt <= Date.now()) {
+        selectedIndex = index;
+        break;
+      }
+      earliestRetryAt = Math.min(earliestRetryAt, retryAt);
+    }
+
+    if (selectedIndex < 0) {
+      this.scheduleSessionPoll(
+        Math.max(minRequestDelay, earliestRetryAt - Date.now()),
+      );
+      return;
+    }
+
+    const chargerId = this.sessionChargers[selectedIndex];
+    this.sessionCursor = (selectedIndex + 1) % this.sessionChargers.length;
+    this.sessionLastRequestAt = Date.now();
+    this.setStateAsync(
+      "info.sessionPollLastRequest",
+      this.sessionLastRequestAt,
+      true,
+    ).catch((error) => {
+      this.log.warn(
+        `Could not persist session request time: ${errorMessage(error)}`,
+      );
+    });
+    const controller = new AbortController();
+    this.sessionAbortController = controller;
+    const request = (async () => {
+      try {
+        const sessions = await this.getChargerSession(
+          chargerId,
+          controller.signal,
+        );
+        if (!this.unloading && this.sessionChargers.includes(chargerId)) {
+          await this.setNewSessionToCharger({ id: chargerId }, sessions);
+        }
+      } catch (error) {
+        if (!this.unloading) {
+          this.log.warn(
+            `Session request failed for charger ${chargerId}: ${errorMessage(error)}`,
+          );
+        }
+      } finally {
+        this.sessionInFlight = null;
+        this.sessionAbortController = null;
+        const delay = Math.max(
+          0,
+          this.sessionLastRequestAt +
+            this.getSessionRequestInterval() -
+            Date.now(),
+        );
+        this.scheduleSessionPoll(delay);
+      }
+    })();
+    this.sessionInFlight = request;
+    await request;
   }
 
   //Is called if a subscribed state changes
@@ -252,53 +876,86 @@ class Easee extends utils.Adapter {
             tmpControl[4] == "circuitMaxCurrentP3"
           ) {
             //Load site for Charger
-            this.getChargerSite(tmpControl[2]).then((site) => {
-              this.log.debug(`Update circuitMaxCurrent to: ${state.val}`);
-              this.log.debug("Get infos from site:");
-              this.log.debug(JSON.stringify(site));
+            this.updateSiteConfigWithRetry(
+              tmpControl[2],
+              id,
+              "Circuit current update",
+              async (site) => {
+                this.log.debug(`Update circuitMaxCurrent to: ${state.val}`);
+                this.log.debug("Get infos from site:");
+                this.log.debug(JSON.stringify(site));
 
-              this.changeMaxCircuitConfig(
-                site.id,
-                site.circuits[0].id,
-                state.val,
-              );
-              this.log.debug("Changes sent to API");
-            });
+                await this.changeMaxCircuitConfig(
+                  site.id,
+                  site.circuits[0].id,
+                  state.val,
+                );
+                this.log.debug("Changes sent to API");
+              },
+              ++this.circuitMaxCurrentSequence,
+            );
           } else if (
             tmpControl[4] == "dynamicCircuitCurrentP1" ||
             tmpControl[4] == "dynamicCircuitCurrentP2" ||
             tmpControl[4] == "dynamicCircuitCurrentP3"
           ) {
-            this.getChargerSite(tmpControl[2]).then((site) => {
-              this.log.debug(`Update dynamicCircuitCurrent to: ${state.val}`);
-              this.log.debug("Get infos from site:");
-              this.log.debug(JSON.stringify(site));
-
-              //Setze die Werte für das Update
-              switch (tmpControl[4]) {
-                case "dynamicCircuitCurrentP1":
-                  dynamicCircuitCurrentP1 = Number(state.val);
-                  break;
-                case "dynamicCircuitCurrentP2":
-                  dynamicCircuitCurrentP2 = Number(state.val);
-                  break;
-                case "dynamicCircuitCurrentP3":
-                  dynamicCircuitCurrentP3 = Number(state.val);
-                  break;
-              }
-
-              //Warten mit dem Update 500ms um weitere Phasen zu setzen:
-              if (adapterIntervals.updateDynamicCircuitCurrent != null) {
-                clearTimeout(adapterIntervals.updateDynamicCircuitCurrent);
-                adapterIntervals.updateDynamicCircuitCurrent = null;
-              }
-              adapterIntervals.updateDynamicCircuitCurrent = setTimeout(
-                async () => {
-                  await this.changeCircuitConfig(site.id, site.circuits[0].id);
-                },
-                500,
-              );
-            });
+            const chargerId = tmpControl[2];
+            let currentState =
+              this.dynamicCircuitCurrentByCharger.get(chargerId);
+            if (!currentState) {
+              currentState = {
+                pendingValues: {},
+                pendingSequences: {},
+                latestSequences: { p1: 0, p2: 0, p3: 0 },
+                timer: null,
+                retryTimer: null,
+                retryResolve: null,
+                queue: Promise.resolve(),
+              };
+              this.dynamicCircuitCurrentByCharger.set(chargerId, currentState);
+            }
+            let phase;
+            switch (tmpControl[4]) {
+              case "dynamicCircuitCurrentP1":
+                phase = "p1";
+                break;
+              case "dynamicCircuitCurrentP2":
+                phase = "p2";
+                break;
+              case "dynamicCircuitCurrentP3":
+                phase = "p3";
+                break;
+            }
+            currentState.pendingValues[phase] = Number(state.val);
+            currentState.pendingSequences[phase] = ++this
+              .dynamicCircuitCurrentSequence;
+            currentState.latestSequences[phase] =
+              currentState.pendingSequences[phase];
+            clearTimeout(currentState.timer);
+            currentState.timer = setTimeout(() => {
+              currentState.timer = null;
+              const changedValues = { ...currentState.pendingValues };
+              const phaseSequences = { ...currentState.pendingSequences };
+              currentState.pendingValues = {};
+              currentState.pendingSequences = {};
+              currentState.queue = currentState.queue
+                .catch((error) => {
+                  this.log.error(
+                    `Previous dynamic current update failed: ${errorMessage(error)}`,
+                  );
+                })
+                .then(() => {
+                  if (this.unloading) {
+                    return;
+                  }
+                  return this.updateDynamicCircuitWithRetry(
+                    chargerId,
+                    currentState,
+                    changedValues,
+                    phaseSequences,
+                  );
+                });
+            }, 500);
           } else {
             this.log.debug(`update config to API: ${id}`);
             if (tmpControl[4] == "isEnabled") {
@@ -394,11 +1051,13 @@ class Easee extends utils.Adapter {
       charger_states.outputCurrent,
       true,
     );
-    await this.setStateAsync(
-      `${charger.id}.status.isOnline`,
-      charger_states.isOnline,
-      true,
-    );
+    if (typeof charger_states.isOnline === "boolean") {
+      await this.setStateAsync(
+        `${charger.id}.status.isOnline`,
+        charger_states.isOnline,
+        true,
+      );
+    }
     await this.setStateAsync(
       `${charger.id}.status.wiFiAPEnabled`,
       charger_states.wiFiAPEnabled,
@@ -564,17 +1223,27 @@ class Easee extends utils.Adapter {
   //Get Token from API
   async login(username, password) {
     try {
-      const response = await axios.post(`${apiUrl}/api/accounts/login`, {
-        userName: username,
-        password: password,
-      });
+      const response = await axios.post(
+        `${apiUrl}/api/accounts/login`,
+        {
+          userName: username,
+          password: password,
+        },
+        { timeout: apiRequestTimeout },
+      );
 
       this.log.info("Easee Api Login successful");
 
       accessToken = response.data.accessToken;
       refreshToken = response.data.refreshToken;
-      expireTime = Date.now() + (response.data.expiresIn - 500);
-      this.log.debug(JSON.stringify(response.data));
+      expireTime =
+        Date.now() +
+        Math.max(
+          Number(response.data.expiresIn) - tokenRefreshMarginSeconds,
+          0,
+        ) *
+          1000;
+      this.log.debug("Easee access token received");
       await this.setStateAsync("info.connection", true, true);
       return true;
     } catch (error) {
@@ -592,19 +1261,29 @@ class Easee extends utils.Adapter {
   //GET net Token from API
   async refreshToken() {
     return await axios
-      .post(`${apiUrl}/api/accounts/refresh_token`, {
-        accessToken: accessToken,
-        refreshToken: refreshToken,
-      })
+      .post(
+        `${apiUrl}/api/accounts/refresh_token`,
+        {
+          accessToken: accessToken,
+          refreshToken: refreshToken,
+        },
+        { timeout: apiRequestTimeout },
+      )
       .then(async (response) => {
         if (logtype) {
           this.log.info("RefreshToken successful");
         }
         accessToken = response.data.accessToken;
         refreshToken = response.data.refreshToken;
-        expireTime = Date.now() + (response.data.expiresIn - 500);
+        expireTime =
+          Date.now() +
+          Math.max(
+            Number(response.data.expiresIn) - tokenRefreshMarginSeconds,
+            0,
+          ) *
+            1000;
         await this.setStateAsync("info.connection", true, true);
-        this.log.debug(JSON.stringify(response.data));
+        this.log.debug("Easee access token refreshed");
       })
       .catch(async (error) => {
         this.log.error("RefreshToken error");
@@ -618,6 +1297,7 @@ class Easee extends utils.Adapter {
     return await axios
       .get(`${apiUrl}/api/chargers`, {
         headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: apiRequestTimeout,
       })
       .then((response) => {
         this.log.debug("Chargers ausgelesen");
@@ -631,67 +1311,61 @@ class Easee extends utils.Adapter {
 
   // Lese den Charger aus
   async getChargerState(charger_id) {
-    return await axios
-      .get(`${apiUrl}/api/chargers/${charger_id}/state`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-      .then((response) => {
-        this.log.debug(`Charger status ausgelesen mit id: ${charger_id}`);
-        this.log.debug(JSON.stringify(response.data));
-        return response.data;
-      })
-      .catch((error) => {
-        this.log.error(error);
-        throw new Error("Easee API error on charger state - stop refresh");
-      });
+    const response = await this.requestWithBackoff(
+      `charger observations ${charger_id}`,
+      () =>
+        axios.get(`${apiUrl}/state/${charger_id}/observations`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params: { ids: CHARGER_STATE_OBSERVATION_IDS.join(",") },
+          timeout: apiRequestTimeout,
+        }),
+    );
+    this.log.debug(`Charger observations read for id: ${charger_id}`);
+    this.log.debug(JSON.stringify(response.data));
+    return observationsToChargerState(response.data);
   }
 
   async getChargerConfig(charger_id) {
-    return await axios
-      .get(`${apiUrl}/api/chargers/${charger_id}/config`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-      .then((response) => {
-        this.log.debug(`Charger config ausgelesen mit id: ${charger_id}`);
-        this.log.debug(JSON.stringify(response.data));
-        return response.data;
-      })
-      .catch((error) => {
-        this.log.error(error);
-        throw new Error("Easee API error on charger config - stop refresh");
-      });
+    const response = await this.requestWithBackoff(
+      `charger config ${charger_id}`,
+      () =>
+        axios.get(`${apiUrl}/api/chargers/${charger_id}/config`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: apiRequestTimeout,
+        }),
+    );
+    this.log.debug(`Charger config ausgelesen mit id: ${charger_id}`);
+    this.log.debug(JSON.stringify(response.data));
+    return response.data;
   }
 
   async getChargerSite(charger_id) {
-    return await axios
-      .get(`${apiUrl}/api/chargers/${charger_id}/site`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-      .then((response) => {
-        this.log.debug(`Charger site ausgelesen mit id: ${charger_id}`);
-        this.log.debug(JSON.stringify(response.data));
-        return response.data;
-      })
-      .catch((error) => {
-        this.log.error(error);
-        throw new Error("Easee API error on charger site - stop refresh");
-      });
+    const response = await this.requestWithBackoff(
+      `charger site ${charger_id}`,
+      () =>
+        axios.get(`${apiUrl}/api/chargers/${charger_id}/site`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: apiRequestTimeout,
+        }),
+    );
+    this.log.debug(`Charger site ausgelesen mit id: ${charger_id}`);
+    this.log.debug(JSON.stringify(response.data));
+    return response.data;
   }
 
-  async getChargerSession(charger_id) {
-    return await axios
-      .get(`${apiUrl}/api/sessions/charger/${charger_id}/monthly`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-      .then((response) => {
-        this.log.debug(`Charger session ausgelesen mit id: ${charger_id}`);
-        this.log.debug(JSON.stringify(response.data));
-        return response.data;
-      })
-      .catch((error) => {
-        this.log.error(error);
-        throw new Error("Easee API error on charger session - stop refresh");
-      });
+  async getChargerSession(charger_id, signal) {
+    const response = await this.requestWithBackoff(
+      `charger session ${charger_id}`,
+      () =>
+        axios.get(`${apiUrl}/api/sessions/charger/${charger_id}/monthly`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: apiRequestTimeout,
+          signal,
+        }),
+    );
+    this.log.debug(`Charger session ausgelesen mit id: ${charger_id}`);
+    this.log.debug(JSON.stringify(response.data));
+    return response.data;
   }
 
   async startCharging(id) {
@@ -826,32 +1500,30 @@ class Easee extends utils.Adapter {
   }
 
   //dynamicCircuitCurrentPX
-  async changeCircuitConfig(site_id, circuit_id) {
+  async changeCircuitConfig(site_id, circuit_id, currentValues) {
     //Der Wert darf nur für 3 Fach Werte aktualisiert werden
     await axios
       .post(
         `${apiUrl}/api/sites/${site_id}/circuits/${circuit_id}/settings`,
         {
-          dynamicCircuitCurrentP1: dynamicCircuitCurrentP1,
-          dynamicCircuitCurrentP2: dynamicCircuitCurrentP2,
-          dynamicCircuitCurrentP3: dynamicCircuitCurrentP3,
+          dynamicCircuitCurrentP1: currentValues.p1,
+          dynamicCircuitCurrentP2: currentValues.p2,
+          dynamicCircuitCurrentP3: currentValues.p3,
         },
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: apiRequestTimeout,
+        },
       )
       .then((response) => {
         this.log.info("Circuit update successful");
         this.log.debug(JSON.stringify(response.data));
+        return response;
       })
       .catch((error) => {
         this.log.error("Circuit update error");
         this.log.error(error);
       });
-
-    //setze Werte zurück
-    adapterIntervals.updateDynamicCircuitCurrent = null;
-    dynamicCircuitCurrentP1 = 0;
-    dynamicCircuitCurrentP2 = 0;
-    dynamicCircuitCurrentP3 = 0;
   }
 
   /***********************************************************************
@@ -1349,7 +2021,7 @@ class Easee extends utils.Adapter {
   /*************** Session Reading ****************/
   async setNewSessionToCharger(charger, charger_session) {
     this.log.debug(JSON.stringify(charger_session));
-    charger_session.forEach(async (session) => {
+    for (const session of charger_session) {
       //für jeden Monat errechnen wir das?
       await this.setObjectNotExistsAsync(
         `${charger.id}.session.${session.year}.${
@@ -1409,16 +2081,16 @@ class Easee extends utils.Adapter {
           native: {},
         },
       );
-    });
+    }
 
     let tmpYear = 1970;
     let tmpYearCount = 0;
-    charger_session.forEach((session) => {
+    for (const session of charger_session) {
       //Jahreszähler umhängen
       this.log.debug("set session year data");
       if (tmpYear != session.year) {
         //neues Jahr setzen alles zurück
-        this.setStateAsync(
+        await this.setStateAsync(
           `${charger.id}.session.${session.year}.total_year`,
           session.totalEnergyUsage,
           true,
@@ -1427,13 +2099,13 @@ class Easee extends utils.Adapter {
         tmpYear = session.year;
       } else {
         tmpYearCount = tmpYearCount + session.totalEnergyUsage;
-        this.setStateAsync(
+        await this.setStateAsync(
           `${charger.id}.session.${session.year}.total_year`,
           tmpYearCount,
           true,
         );
       }
-    });
+    }
   }
 
   /*************** Config Reading ****************/
@@ -1671,6 +2343,7 @@ class Easee extends utils.Adapter {
 if (module.parent) {
   // Export the constructor in compact mode
   module.exports = (options) => new Easee(options);
+  module.exports.Easee = Easee;
 } else {
   // otherwise start the instance directly
   new Easee();
