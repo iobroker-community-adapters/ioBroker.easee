@@ -31,6 +31,7 @@ jobs:
           node-version: '24.x'
           # Uncomment the following line if your adapter cannot be installed using 'npm ci'
           # install-command: 'npm install'
+          type-checking: true
           lint: true
 
   # Runs adapter tests on all supported node versions and OSes
@@ -48,7 +49,6 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           os: ${{ matrix.os }}
-          build: true
           # Uncomment the following line if your adapter cannot be installed using 'npm ci'
           # install-command: 'npm install'
 
@@ -76,7 +76,6 @@ jobs:
       - uses: ioBroker/testing-action-deploy@v1
         with:
           node-version: '24.x'
-          build: true
           # Uncomment the following line if your adapter cannot be installed using 'npm ci'
           # install-command: 'npm install'
           github-token: ${{ secrets.GITHUB_TOKEN }}
