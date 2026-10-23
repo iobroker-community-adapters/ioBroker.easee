@@ -11,7 +11,7 @@ import {
 } from "./lib/observations.ts";
 import type { ChargerObservationState } from "./lib/observations.ts";
 
-type Timer = ReturnType<typeof setTimeout>;
+type Timer = ioBroker.Timeout | undefined;
 type Phase = "p1" | "p2" | "p3";
 type AdapterOptions = ioBroker.AdapterOptions;
 
@@ -333,8 +333,8 @@ class Easee extends Adapter {
     if (this.unloading) {
       return;
     }
-    clearTimeout(adapterIntervals.signalRReconnect);
-    adapterIntervals.signalRReconnect = setTimeout(() => {
+    this.clearTimeout(adapterIntervals.signalRReconnect);
+    adapterIntervals.signalRReconnect = this.setTimeout(() => {
       this.startSignal();
     }, 30000);
   }
@@ -434,32 +434,32 @@ class Easee extends Adapter {
   // Clear all Timeouts and inform users
   onUnload(callback: () => void): void {
     this.unloading = true;
-    clearTimeout(adapterIntervals.readAllStates);
+    this.clearTimeout(adapterIntervals.readAllStates);
     if (this.sessionPollTimer) {
-      clearTimeout(this.sessionPollTimer);
+      this.clearTimeout(this.sessionPollTimer);
     }
     this.sessionPollTimer = null;
     this.sessionAbortController?.abort();
     const sessionShutdown = this.sessionInFlight;
     for (const chargerState of this.dynamicCircuitCurrentByCharger.values()) {
       if (chargerState.timer) {
-        clearTimeout(chargerState.timer);
+        this.clearTimeout(chargerState.timer);
       }
       if (chargerState.retryTimer) {
-        clearTimeout(chargerState.retryTimer);
+        this.clearTimeout(chargerState.retryTimer);
       }
       chargerState.retryResolve?.();
     }
     this.dynamicCircuitCurrentByCharger.clear();
     for (const circuitState of this.dynamicCircuitCurrentByCircuit.values()) {
       if (circuitState.timer) {
-        clearTimeout(circuitState.timer);
+        this.clearTimeout(circuitState.timer);
       }
     }
     this.dynamicCircuitCurrentByCircuit.clear();
-    clearTimeout(adapterIntervals.signalRReconnect);
+    this.clearTimeout(adapterIntervals.signalRReconnect);
     for (const retry of this.pendingSiteConfigRetries.values()) {
-      clearTimeout(retry.timer);
+      this.clearTimeout(retry.timer);
     }
     this.pendingSiteConfigRetries.clear();
     const signalRShutdown = Promise.resolve(
@@ -574,7 +574,7 @@ class Easee extends Adapter {
       const retryKey = `${chargerId}:${stateId}`;
       const existingRetry = this.pendingSiteConfigRetries.get(retryKey);
       if (existingRetry) {
-        clearTimeout(existingRetry.timer);
+        this.clearTimeout(existingRetry.timer);
       }
 
       const siteRetry = this.apiRetryState.get(`charger site ${chargerId}`);
@@ -582,7 +582,7 @@ class Easee extends Adapter {
         0,
         (siteRetry?.retryAt || Date.now()) - Date.now(),
       );
-      const timer = setTimeout(() => {
+      const timer = this.setTimeout(() => {
         this.pendingSiteConfigRetries.delete(retryKey);
         this.updateSiteConfigWithRetry(
           chargerId,
@@ -673,7 +673,7 @@ class Easee extends Adapter {
           return;
         }
         if (circuitState.timer === null) {
-          circuitState.timer = setTimeout(() => {
+          circuitState.timer = this.setTimeout(() => {
             circuitState.timer = null;
             const currentValues = { ...circuitState.values };
             circuitState.values = { p1: 0, p2: 0, p3: 0 };
@@ -711,7 +711,7 @@ class Easee extends Adapter {
         );
         await new Promise<void>((resolve) => {
           chargerState.retryResolve = resolve;
-          chargerState.retryTimer = setTimeout(resolve, delay);
+          chargerState.retryTimer = this.setTimeout(resolve, delay);
         });
         chargerState.retryResolve = null;
         chargerState.retryTimer = null;
@@ -812,7 +812,7 @@ class Easee extends Adapter {
       true,
     );
     if (!this.unloading) {
-      adapterIntervals.readAllStates = setTimeout(
+      adapterIntervals.readAllStates = this.setTimeout(
         this.readAllStates.bind(this),
         polltime * 1000,
       );
@@ -840,7 +840,7 @@ class Easee extends Adapter {
 
     if (!this.sessionChargers.length) {
       if (this.sessionPollTimer) {
-        clearTimeout(this.sessionPollTimer);
+        this.clearTimeout(this.sessionPollTimer);
       }
       this.sessionPollTimer = null;
       return;
@@ -908,9 +908,9 @@ class Easee extends Adapter {
       return;
     }
     if (this.sessionPollTimer) {
-      clearTimeout(this.sessionPollTimer);
+      this.clearTimeout(this.sessionPollTimer);
     }
-    this.sessionPollTimer = setTimeout(() => {
+    this.sessionPollTimer = this.setTimeout(() => {
       this.sessionPollTimer = null;
       this.pollNextSession().catch((error) => {
         this.log.warn(`Session polling failed: ${errorMessage(error)}`);
@@ -1087,9 +1087,9 @@ class Easee extends Adapter {
             currentState.latestSequences[phase] =
               currentState.pendingSequences[phase] ?? 0;
             if (currentState.timer) {
-              clearTimeout(currentState.timer);
+              this.clearTimeout(currentState.timer);
             }
-            currentState.timer = setTimeout(() => {
+            currentState.timer = this.setTimeout(() => {
               currentState.timer = null;
               const changedValues = { ...currentState.pendingValues };
               const phaseSequences = { ...currentState.pendingSequences };
