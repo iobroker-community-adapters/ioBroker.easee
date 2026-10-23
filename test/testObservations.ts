@@ -1,11 +1,14 @@
 "use strict";
 
-const { expect } = require("chai");
-const {
+export {};
+
+import { expect } from "chai";
+import { describe, it } from "mocha";
+import {
   CHARGER_STATE_OBSERVATION_IDS,
   observationsToChargerState,
-} = require("../lib/observations.js");
-const easeeEnums = require("../lib/enum.js");
+} from "../lib/observations.ts";
+import * as easeeEnums from "../lib/enum.ts";
 
 describe("Easee charger observations", () => {
   it("maps observations to the existing charger state fields", () => {

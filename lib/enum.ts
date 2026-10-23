@@ -315,7 +315,7 @@
 #define COMMAND_SET_LISTEN_TO_CONTROL_PULSE_ARG_LISTEN_TO_CONTROL_PULSE 1 //ListenToControlPulse [Boolean]
 #endif
 */
-const easeeIds = {
+const easeeIds: Record<number, string> = {
   //config
   31: ".config.isEnabled",
   36: ".config.wiFiSSID",
@@ -358,12 +358,10 @@ const easeeIds = {
   199: ".status.inVoltageT4T5",
 };
 Object.freeze(easeeIds);
-module.exports = {
-  getNameByEnum: function (id) {
-    return easeeIds[id];
-    //return "Not Found"
-  },
-  getValue: function () {
-    // whatever
-  },
-};
+export function getNameByEnum(id: number): string | undefined {
+  return easeeIds[id];
+}
+
+export function getValue(): undefined {
+  return undefined;
+}

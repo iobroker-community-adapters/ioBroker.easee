@@ -1,14 +1,15 @@
-// Specialized tsconfig for type-checking js files
+// Type-check all adapter and test TypeScript sources.
 {
     "extends": "./tsconfig.json",
     "compilerOptions": {},
     "include": [
-        "**/*.js",
+        "**/*.ts",
         "**/*.d.ts"
     ],
     "exclude": [
         "**/build",
         "node_modules/",
-        "widgets/"
+        "widgets/",
+        "admin/"
     ]
 }

@@ -40,6 +40,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (Voodoo2man) Migrated the adapter to TypeScript
+
 ### 2.0.0 (2026-10-18)
 - (Voodoo2man) Improved charger status and connectivity handling with the Observations API, SignalR resilience, bounded polling, and API retries, incorporating contributions from @Voodoo2man, @Michaelnorge, @Codibris, and @m1chel87, with earlier Node.js and JSON-config groundwork from @NCIceWolf.
 - (Voodoo2man) Improved circuit-current update reliability and added configurable, rate-limit-aware session polling across chargers.
