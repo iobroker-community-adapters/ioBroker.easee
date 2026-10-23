@@ -1,22 +1,38 @@
 "use strict";
 
-const { expect } = require("chai");
-const sinon = require("sinon");
-const axios = require("axios").default;
-const signalR = require("@microsoft/signalr");
-const Module = require("node:module");
-const { afterEach, describe, it } = require("mocha");
-const originalLoad = Module._load;
-Module._load = function (request, parent, isMain) {
+import { expect } from "chai";
+import sinon from "sinon";
+import axios from "axios";
+import * as signalR from "@microsoft/signalr";
+import Module from "node:module";
+import type { Module as NodeModule } from "node:module";
+import { afterEach, describe, it } from "mocha";
+
+interface ModuleLoader {
+  _load: (
+    request: string,
+    parent: NodeModule | undefined,
+    isMain: boolean,
+  ) => unknown;
+}
+
+const moduleLoader = Module as unknown as ModuleLoader;
+const originalLoad = moduleLoader._load;
+moduleLoader._load = function (
+  request: string,
+  parent: NodeModule | undefined,
+  isMain: boolean,
+) {
   if (request === "@iobroker/adapter-core") {
     return { Adapter: class {} };
   }
   return originalLoad.call(this, request, parent, isMain);
 };
-const createAdapter = require("./main.js");
-Module._load = originalLoad;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const createAdapter = require("./main.ts");
+moduleLoader._load = originalLoad;
 
-function createAdapterHarness() {
+function createAdapterHarness(): ReturnType<typeof createAdapter> {
   const adapter = Object.create(createAdapter.Easee.prototype);
   adapter.log = {
     debug: sinon.stub(),
@@ -50,13 +66,22 @@ function createAdapterHarness() {
   adapter.sessionRetryAt = 0;
   adapter.updateSiteConfigWithRetry = sinon
     .stub()
-    .callsFake((chargerId, _stateId, _description, update) =>
-      update({
-        id: `site-${chargerId}`,
-        circuits: [{ id: `circuit-${chargerId}` }],
-      }),
+    .callsFake(
+      (
+        chargerId: string,
+        _stateId: string,
+        _description: string,
+        update: (site: {
+          id: string;
+          circuits: { id: string }[];
+        }) => Promise<void>,
+      ) =>
+        update({
+          id: `site-${chargerId}`,
+          circuits: [{ id: `circuit-${chargerId}` }],
+        }),
     );
-  adapter.getChargerSite = sinon.stub().callsFake((chargerId) =>
+  adapter.getChargerSite = sinon.stub().callsFake((chargerId: string) =>
     Promise.resolve({
       id: `site-${chargerId}`,
       circuits: [{ id: `circuit-${chargerId}` }],
@@ -102,10 +127,10 @@ describe("Easee polling regressions", () => {
   it("serializes writes for the same charger in request order", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
-    let resolveFirstWrite;
+    let resolveFirstWrite: (() => void) | undefined;
     const changeCircuitConfig = sinon.stub();
     changeCircuitConfig.onFirstCall().returns(
-      new Promise((resolve) => {
+      new Promise<void>((resolve) => {
         resolveFirstWrite = resolve;
       }),
     );
@@ -126,7 +151,7 @@ describe("Easee polling regressions", () => {
     await clock.tickAsync(1000);
     expect(changeCircuitConfig.callCount).to.equal(1);
 
-    resolveFirstWrite();
+    resolveFirstWrite!();
     await clock.tickAsync(0);
     expect(changeCircuitConfig.callCount).to.equal(2);
     expect(changeCircuitConfig.secondCall.args[2]).to.deep.equal({
@@ -142,17 +167,19 @@ describe("Easee polling regressions", () => {
     const changeCircuitConfig = sinon.stub().resolves();
     adapter.changeCircuitConfig = changeCircuitConfig;
     const getChargerSite = adapter.getChargerSite;
-    let resolveRetrySite;
-    getChargerSite.onFirstCall().callsFake(async () => {
+    let resolveRetrySite:
+      ((site: { id: string; circuits: { id: string }[] }) => void) | undefined;
+    getChargerSite.onFirstCall().callsFake(() => {
       adapter.apiRetryState.set("charger site charger", {
         retryAt: Date.now() + 30000,
       });
-      const error = new Error("temporary site failure");
-      error.retryDeferred = true;
+      const error = Object.assign(new Error("temporary site failure"), {
+        retryDeferred: true,
+      });
       throw error;
     });
     getChargerSite.onSecondCall().returns(
-      new Promise((resolve) => {
+      new Promise<{ id: string; circuits: { id: string }[] }>((resolve) => {
         resolveRetrySite = resolve;
       }),
     );
@@ -170,7 +197,7 @@ describe("Easee polling regressions", () => {
     });
     await clock.tickAsync(30500);
     expect(getChargerSite.callCount).to.equal(2);
-    resolveRetrySite({
+    resolveRetrySite!({
       id: "site-charger",
       circuits: [{ id: "circuit-charger" }],
     });
@@ -188,10 +215,12 @@ describe("Easee polling regressions", () => {
     const clock = sinon.useFakeTimers();
     const changeCircuitConfig = sinon.stub().resolves();
     adapter.changeCircuitConfig = changeCircuitConfig;
-    adapter.getChargerSite.callsFake(async () => ({
-      id: "shared-site",
-      circuits: [{ id: "shared-circuit" }],
-    }));
+    adapter.getChargerSite.callsFake(() =>
+      Promise.resolve({
+        id: "shared-site",
+        circuits: [{ id: "shared-circuit" }],
+      }),
+    );
 
     adapter.onStateChange("easee.0.chargerA.config.dynamicCircuitCurrentP1", {
       val: 16,
@@ -244,18 +273,21 @@ describe("Easee polling regressions", () => {
     adapter.changeMaxCircuitConfig = changeMaxCircuitConfig;
     adapter.updateSiteConfigWithRetry =
       createAdapter.Easee.prototype.updateSiteConfigWithRetry;
-    adapter.getChargerSite.onFirstCall().callsFake(async () => {
+    adapter.getChargerSite.onFirstCall().callsFake(() => {
       adapter.apiRetryState.set("charger site chargerA", {
         retryAt: Date.now() + 30000,
       });
-      const error = new Error("temporary site failure");
-      error.retryDeferred = true;
+      const error = Object.assign(new Error("temporary site failure"), {
+        retryDeferred: true,
+      });
       throw error;
     });
-    adapter.getChargerSite.callsFake(async () => ({
-      id: "shared-site",
-      circuits: [{ id: "shared-circuit" }],
-    }));
+    adapter.getChargerSite.callsFake(() =>
+      Promise.resolve({
+        id: "shared-site",
+        circuits: [{ id: "shared-circuit" }],
+      }),
+    );
 
     adapter.onStateChange("easee.0.chargerA.config.circuitMaxCurrentP1", {
       val: 16,
@@ -282,10 +314,10 @@ describe("Easee polling regressions", () => {
   it("clears each phase buffer when taking a snapshot despite an active write", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
-    let resolveFirstWrite;
+    let resolveFirstWrite: (() => void) | undefined;
     const changeCircuitConfig = sinon.stub();
     changeCircuitConfig.onFirstCall().returns(
-      new Promise((resolve) => {
+      new Promise<void>((resolve) => {
         resolveFirstWrite = resolve;
       }),
     );
@@ -311,7 +343,7 @@ describe("Easee polling regressions", () => {
     await clock.tickAsync(1000);
     expect(changeCircuitConfig.callCount).to.equal(1);
 
-    resolveFirstWrite();
+    resolveFirstWrite!();
     await clock.tickAsync(0);
     expect(changeCircuitConfig.secondCall.args[2]).to.deep.equal({
       p1: 0,
@@ -352,9 +384,9 @@ describe("Easee polling regressions", () => {
 
     await adapter.setNewStatusToCharger({ id: "charger", name: "Charger" }, {});
 
-    expect(adapter.setStateAsync.calledWith("charger.status.isOnline")).to.equal(
-      false,
-    );
+    expect(
+      adapter.setStateAsync.calledWith("charger.status.isOnline"),
+    ).to.equal(false);
   });
 
   it("subscribes a charger discovered after SignalR connected", async () => {
@@ -385,13 +417,13 @@ describe("Easee polling regressions", () => {
 
     await adapter.getChargerState("charger-1");
 
-    expect(get.firstCall.args[1].timeout).to.equal(30000);
+    expect(get.firstCall.args[1]!.timeout).to.equal(30000);
   });
 
   it("does not continue a poll after unload begins during the charger-list request", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
-    let resolveChargerList;
+    let resolveChargerList: ((chargers: { id: string }[]) => void) | undefined;
     adapter.refreshToken = sinon.stub().resolves();
     adapter.getAllCharger = () =>
       new Promise((resolve) => {
@@ -401,7 +433,7 @@ describe("Easee polling regressions", () => {
 
     await Promise.resolve();
     adapter.unloading = true;
-    resolveChargerList([]);
+    resolveChargerList!([]);
     await polling;
 
     expect(adapter.setStateAsync.called).to.equal(false);
@@ -433,7 +465,7 @@ describe("Easee polling regressions", () => {
     });
   }
 
-  it("uses a manually configured per-charger interval without breaking the API floor", async () => {
+  it("uses a manually configured per-charger interval without breaking the API floor", () => {
     const adapter = createAdapterHarness();
     adapter.sessionPollMode = "manual";
     adapter.sessionManualInterval = 20;
@@ -454,11 +486,13 @@ describe("Easee polling regressions", () => {
     adapter.updateSessionChargers([{ id: "charger-a" }, { id: "charger-b" }]);
     await clock.tickAsync(0);
     expect(getSession.calledOnce).to.equal(true);
-    expect(adapter.setStateAsync.calledWithExactly(
-      "info.sessionPollLastRequest",
-      clock.now,
-      true,
-    )).to.equal(true);
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "info.sessionPollLastRequest",
+        clock.now,
+        true,
+      ),
+    ).to.equal(true);
     await clock.tickAsync(10 * 60 * 1000 - 1);
     expect(getSession.calledOnce).to.equal(true);
     await clock.tickAsync(1);
@@ -493,7 +527,7 @@ describe("Easee polling regressions", () => {
   it("starts immediately and never overlaps or duplicates session requests", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
-    let resolveRequest;
+    let resolveRequest: ((sessions: unknown[]) => void) | undefined;
     const getSession = sinon.stub().returns(
       new Promise((resolve) => {
         resolveRequest = resolve;
@@ -509,7 +543,7 @@ describe("Easee polling regressions", () => {
     await clock.tickAsync(14 * 60 * 1000);
     expect(getSession.calledOnce).to.equal(true);
 
-    resolveRequest([]);
+    resolveRequest!([]);
     await clock.tickAsync(0);
     await clock.tickAsync(7 * 60 * 1000);
     expect(getSession.secondCall.args[0]).to.equal("charger-b");
@@ -533,7 +567,9 @@ describe("Easee polling regressions", () => {
 
   it("honors Retry-After seconds and HTTP-date values", async () => {
     const adapter = createAdapterHarness();
-    const clock = sinon.useFakeTimers({ now: new Date("2026-10-18T12:00:00Z") });
+    const clock = sinon.useFakeTimers({
+      now: new Date("2026-10-18T12:00:00Z"),
+    });
     adapter.requestWithBackoff =
       createAdapter.Easee.prototype.requestWithBackoff;
     const requests = [
@@ -551,10 +587,11 @@ describe("Easee polling regressions", () => {
       try {
         await adapter.requestWithBackoff(`charger session ${index}`, request);
       } catch (error) {
-        expect(error.retryDeferred).to.equal(true);
+        expect(error).to.have.property("retryDeferred", true);
       }
-      expect(adapter.apiRetryState.get(`charger session ${index}`).retryAt).to
-        .equal(clock.now + (index === 0 ? 120000 : 300000));
+      expect(
+        adapter.apiRetryState.get(`charger session ${index}`).retryAt,
+      ).to.equal(clock.now + (index === 0 ? 120000 : 300000));
     }
   });
 
@@ -569,7 +606,7 @@ describe("Easee polling regressions", () => {
         sinon.stub().rejects({ response: { status: 429 } }),
       );
     } catch (error) {
-      expect(error.retryDeferred).to.equal(true);
+      expect(error).to.have.property("retryDeferred", true);
     }
     expect(
       adapter.apiRetryState.get("charger session charger-a").retryAt,
@@ -592,7 +629,7 @@ describe("Easee polling regressions", () => {
         }),
       );
     } catch (error) {
-      expect(error.retryDeferred).to.equal(true);
+      expect(error).to.have.property("retryDeferred", true);
     }
     expect(
       adapter.apiRetryState.get("charger session charger-a").retryAt,
@@ -612,7 +649,7 @@ describe("Easee polling regressions", () => {
         }),
       );
     } catch (error) {
-      expect(error.retryDeferred).to.equal(true);
+      expect(error).to.have.property("retryDeferred", true);
     }
 
     const getSession = sinon.stub().resolves([]);
@@ -662,8 +699,9 @@ describe("Easee polling regressions", () => {
 
     await adapter.readAllStates();
     await clock.tickAsync(0);
-    expect(getSession.calledOnceWithExactly("charger-a", sinon.match.any)).to
-      .equal(true);
+    expect(
+      getSession.calledOnceWithExactly("charger-a", sinon.match.any),
+    ).to.equal(true);
     adapter.onUnload(() => {});
     expect(adapter.sessionPollTimer).to.equal(null);
     expect(clock.countTimers()).to.equal(0);
@@ -673,7 +711,9 @@ describe("Easee polling regressions", () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
     adapter.refreshToken = sinon.stub().resolves();
-    adapter.getAllCharger = sinon.stub().resolves([{ id: "config-error-charger" }]);
+    adapter.getAllCharger = sinon
+      .stub()
+      .resolves([{ id: "config-error-charger" }]);
     adapter.setAllStatusObjects = sinon.stub().resolves();
     adapter.setAllConfigObjects = sinon.stub().resolves();
     adapter.subscribeChargerToSignalR = sinon.stub().resolves();
@@ -692,20 +732,22 @@ describe("Easee polling regressions", () => {
   it("aborts an in-flight session request during unload", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
-    let requestSignal;
-    adapter.getChargerSession = sinon.stub().callsFake((_chargerId, signal) => {
-      requestSignal = signal;
-      return new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(new Error("aborted")));
+    let requestSignal: AbortSignal | undefined;
+    adapter.getChargerSession = sinon
+      .stub()
+      .callsFake((_chargerId: string, signal: AbortSignal) => {
+        requestSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
       });
-    });
     adapter.setNewSessionToCharger = sinon.stub().resolves();
 
     adapter.updateSessionChargers([{ id: "charger-a" }]);
     await clock.tickAsync(0);
-    expect(requestSignal.aborted).to.equal(false);
+    expect(requestSignal!.aborted).to.equal(false);
     adapter.onUnload(() => {});
-    expect(requestSignal.aborted).to.equal(true);
+    expect(requestSignal!.aborted).to.equal(true);
     await clock.tickAsync(0);
     expect(clock.countTimers()).to.equal(0);
   });

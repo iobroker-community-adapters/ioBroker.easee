@@ -6,7 +6,8 @@
     "configurations": [
         {
             "name": "Launch normal",
-            "program": "${workspaceFolder}/main.js",
+            "program": "${workspaceFolder}/main.ts",
+            "runtimeArgs": ["--require", "${workspaceFolder}/node_modules/@alcalzone/esbuild-register/register.js"],
             "args": ["--instance", "0", "--force", "--logs", "--debug"],
             "request": "launch",
             "stopOnEntry": true,

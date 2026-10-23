@@ -27,6 +27,7 @@
     "tough-cookie": "^4.1.4"
   },
   "devDependencies": {
+    "@alcalzone/esbuild-register": "2.5.1-1",
     "@alcalzone/release-script": "^5.2.1",
     "@alcalzone/release-script-plugin-iobroker": "^5.2.0",
     "@alcalzone/release-script-plugin-license": "^5.2.2",
@@ -36,22 +37,23 @@
     "@iobroker/testing": "^6.3.1",
     "@tsconfig/node22": "^22.0.6",
     "@types/node": "^22.13.0",
+    "@types/tough-cookie": "4.0.5",
     "typescript": "^5.7.3"
   },
-  "main": "main.js",
+  "main": "main.ts",
   "files": [
     "admin/",
     "lib/",
     "io-package.json",
     "LICENSE",
-    "main.js",
+    "main.ts",
     "package.json",
     "README.md"
   ],
   "scripts": {
     "translate": "translate-adapter",
     "release": "release-script",
-    "test:js": "mocha --config test/mocharc.custom.json \"{!(node_modules|test)/**/*.test.js,*.test.js,test/**/test!(PackageFiles|Startup).js}\"",
+    "test:js": "mocha --config test/mocharc.custom.json \"{!(node_modules|test)/**/*.test.{js,ts},*.test.{js,ts},test/**/test!(PackageFiles|Startup).{js,ts}}\"",
     "test:package": "mocha test/package --exit",
     "test:integration": "mocha test/integration --exit",
     "test": "npm run test:js && npm run test:package",

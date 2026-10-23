@@ -1,35 +1,45 @@
 "use strict";
 
-const axios = require("axios").default;
-const signalR = require("@microsoft/signalr");
-const { CookieJar } = require("tough-cookie");
+import axios from "axios";
+import * as signalR from "@microsoft/signalr";
+import { CookieJar } from "tough-cookie";
+import type { HttpRequest, HttpResponse } from "@microsoft/signalr";
 
-function hasHeader(headers, name) {
+type SignalRRequest = HttpRequest;
+
+interface SignalRHttpClientLike {
+  request: typeof axios.request;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some(
     (headerName) => headerName.toLowerCase() === name.toLowerCase(),
   );
 }
 
 class AxiosSignalRHttpClient extends signalR.HttpClient {
-  /** @param {any} [httpClient] */
-  constructor(httpClient = axios) {
+  httpClient: SignalRHttpClientLike;
+  cookieJar: InstanceType<typeof CookieJar>;
+
+  constructor(httpClient: SignalRHttpClientLike = axios) {
     super();
     this.httpClient = httpClient;
     this.cookieJar = new CookieJar();
   }
 
-  async send(request) {
+  async send(request: SignalRRequest): Promise<HttpResponse> {
     if (!request.url) {
       throw new Error("SignalR HTTP request URL is missing");
     }
-    const headers = { ...request.headers };
+    const headers = { ...(request.headers || {}) };
     const cookie = this.cookieJar.getCookieStringSync(request.url);
     if (cookie && !hasHeader(headers, "cookie")) {
       headers.Cookie = cookie;
     }
     const cancelSource = axios.CancelToken.source();
-    const abortHandler = () =>
+    const abortHandler = (): void => {
       cancelSource.cancel("SignalR HTTP request aborted");
+    };
     if (request.abortSignal) {
       request.abortSignal.onabort = abortHandler;
     }
@@ -43,7 +53,7 @@ class AxiosSignalRHttpClient extends signalR.HttpClient {
         cancelToken: cancelSource.token,
         responseType:
           request.responseType === "arraybuffer" ? "arraybuffer" : "text",
-        transformResponse: [(data) => data],
+        transformResponse: [(data: unknown) => data],
         validateStatus: () => true,
       });
       for (const setCookie of response.headers?.["set-cookie"] || []) {
@@ -75,9 +85,21 @@ class AxiosSignalRHttpClient extends signalR.HttpClient {
     }
   }
 
-  getCookieString(url) {
+  get(url: string, options?: SignalRRequest): Promise<HttpResponse> {
+    return this.send({ ...options, url, method: "GET" });
+  }
+
+  post(url: string, options?: SignalRRequest): Promise<HttpResponse> {
+    return this.send({ ...options, url, method: "POST" });
+  }
+
+  delete(url: string, options?: SignalRRequest): Promise<HttpResponse> {
+    return this.send({ ...options, url, method: "DELETE" });
+  }
+
+  getCookieString(url: string): string {
     return this.cookieJar.getCookieStringSync(url);
   }
 }
 
-module.exports = AxiosSignalRHttpClient;
+export = AxiosSignalRHttpClient;
