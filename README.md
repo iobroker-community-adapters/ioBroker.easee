@@ -41,8 +41,8 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
-- (Voodoo2man) Migrated the adapter to TypeScript
-- (Voodoo2man) Updated adapter development tooling and Admin configuration
+- (Voodoo2man) Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required
+- (Voodoo2man) Updated adapter tooling, Admin configuration, and runtime metadata
 
 ### 2.0.0 (2026-10-18)
 - (Voodoo2man) Improved charger status and connectivity handling with the Observations API, SignalR resilience, bounded polling, and API retries, incorporating contributions from @Voodoo2man, @Michaelnorge, @Codibris, and @m1chel87, with earlier Node.js and JSON-config groundwork from @NCIceWolf.

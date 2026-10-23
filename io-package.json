@@ -115,7 +115,7 @@
     "tier": 3,
     "mode": "daemon",
     "type": "vehicle",
-    "compact": true,
+    "compact": false,
     "connectionType": "cloud",
     "dataSource": "poll",
     "adminUI": {
