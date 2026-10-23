@@ -40,6 +40,13 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
     info: sinon.stub(),
     warn: sinon.stub(),
   };
+  adapter.setTimeout = (callback: () => void, delay: number) =>
+    globalThis.setTimeout(callback, delay) as unknown as ioBroker.Timeout;
+  adapter.clearTimeout = (timer: ioBroker.Timeout | undefined) => {
+    if (timer !== null && timer !== undefined) {
+      globalThis.clearTimeout(timer);
+    }
+  };
   adapter.setStateAsync = sinon.stub().resolves();
   adapter.apiRetryState = new Map();
   adapter.pendingSiteConfigRetries = new Map();
