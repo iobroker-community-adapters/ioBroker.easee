@@ -41,6 +41,7 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+- (Voodoo2man) Required Node.js version raised to 22.19.0 for direct TypeScript execution
 - (Voodoo2man) Disabled Compact Mode for the TypeScript entry point
 - (Voodoo2man) Migrated the adapter to TypeScript
 - (Voodoo2man) Updated adapter development tooling and Admin configuration
