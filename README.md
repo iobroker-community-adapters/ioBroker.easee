@@ -40,7 +40,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 3.0.0 (2026-10-23)
 - (Voodoo2man) Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required
 - (Voodoo2man) Updated adapter tooling, Admin configuration, and runtime metadata
 
@@ -63,9 +63,6 @@ This adapter would not have been possible without the great work of @Newan (http
 * (walburgf)  created addition parameter in admin config to reduce/steer logging information for user
 * (walburgf)  modified internationalization to use jsonConfig.json. this needs at least ioBroker.admin version 5
 * (walburgf)  added dependency to admin >=v5.1.28
-
-### 1.0.8 (2023-07-02)
-* (Newan)  small fixes
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 

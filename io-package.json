@@ -1,8 +1,21 @@
 {
   "common": {
     "name": "easee",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "news": {
+      "3.0.0": {
+        "en": "Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required\nUpdated adapter tooling, Admin configuration, and runtime metadata",
+        "de": "Adapter auf TypeScript migriert; Node.js 22.19.0 oder neuer nötig\nAdapter-Tools, Admin-Konfiguration und Runtime-Metadaten aktualisiert",
+        "ru": "Адаптер перенесен на TypeScript; требуется Node.js 22.19.0 или новее\nОбновленные инструменты адаптера, конфигурация администратора и метаданные времени выполнения",
+        "pt": "Migrou o adaptador para o TypeScript; requer Node.js 22.19.0 ou maior\nAdaptador, configuração Admin e metadados de tempo de execução atualizados",
+        "nl": "De adapter is overgezet naar TypeScript; Node.js 22.19.0 of nieuwer is vereist\nBijgewerkte adapterhulpmiddelen, beheerdersconfiguratie en runtime-metagegevens",
+        "fr": "L'adaptateur a migré vers TypeScript ; Node.js 22.19.0 ou plus récent est requis\nOutils d'adaptation, configuration admin et métadonnées d'exécution mis à jour",
+        "it": "È migrato l'adattatore a TypeScript; è richiesto Node.js 22.19.0 o più\nAdapter, configurazione admin e metadati di runtime aggiornati",
+        "es": "Migró el adaptador a TypeScript; se necesita Node.js 22.19.0 o más\nSe actualizaron los adaptadores, la configuración de administración y los metadatos",
+        "pl": "Przeniesiono adapter do TypeScript; wymagany jest plik Node.js 22.19.0 lub nowszy\nZaktualizowano oprzyrządowanie adaptera, konfigurację administratora i metadane środowiska wykonawczego",
+        "uk": "Перемістив адаптер на TypeScript; потрібен Node.js 22.19.0 або новіший\nОновлені інструменти адаптера, конфігурація адміністратора та метадані виконання",
+        "zh-cn": "已将适配器迁移到 TypeScript；需要 Node.js 22.19.0 或更高版本\n更新了适配器工具、管理员配置和运行时元数据"
+      },
       "2.0.0": {
         "en": "Improved charger status and connectivity handling with the Observations API, SignalR resilience, bounded polling, and API retries, incorporating contributions from @Voodoo2man, @Michaelnorge, @Codibris, and @m1chel87, with earlier Node.js and JSON-config groundwork from @NCIceWolf.\nImproved circuit-current update reliability and added configurable, rate-limit-aware session polling across chargers.\nAdded configurable net charging prices and VAT with synchronized gross prices.",
         "de": "Verbesserter Ladestatus und Konnektivität mit Observations API, SignalR Resilience, Bounded Polling und API-Wiederholungen, mit Beiträgen von @Voodoo2man, @Michaelnorge, @Codibris und @m1chel87, mit früheren Node.js- und JSON-Config-Grundlagen von @NCIceWolf.\nZuverlässiger Stromausgleich und konfigurierbares, ratenbegrenztes Session-Polling auf Ladegeräten hinzugefügt.\nNettopreise und Mehrwertsteuer mit synchronisierten Bruttopreisen hinzugefügt.",

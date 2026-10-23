@@ -1,4 +1,7 @@
 # Older changes
+## 1.0.8 (2023-07-02)
+* (Newan)  small fixes
+
 ## 1.0.7
 * (Newan) Changed login URL
 
