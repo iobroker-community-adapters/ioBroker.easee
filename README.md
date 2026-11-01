@@ -46,7 +46,6 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### 3.1.0 (2026-11-01)
-- (Voodoo2man) Reduced routine configuration success messages to debug level.
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
 - (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.
 - (Voodoo2man) Improved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.
