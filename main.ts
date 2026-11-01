@@ -7,9 +7,13 @@ import * as objEnum from "./lib/enum.ts";
 import AxiosSignalRHttpClient from "./lib/signalr-http-client.ts";
 import {
   CHARGER_STATE_OBSERVATION_IDS,
-  observationsToChargerState,
+  normalizeBooleanObservation,
+  observationsToChargerStateWithTimestamps,
 } from "./lib/observations.ts";
-import type { ChargerObservationState } from "./lib/observations.ts";
+import type {
+  ChargerObservationResult,
+  ChargerObservationState,
+} from "./lib/observations.ts";
 
 type Timer = ioBroker.Timeout | undefined;
 type Phase = "p1" | "p2" | "p3";
@@ -90,7 +94,13 @@ interface SignalRProductUpdate {
   id: number;
   mid: string;
   dataType: number;
+  timestamp?: string;
   value: string | number | boolean;
+}
+
+interface ObservationVersion {
+  timestamp?: number;
+  source: "REST" | "SignalR";
 }
 
 //Eigene Variablen
@@ -105,7 +115,6 @@ let expireTime = Date.now();
 let polltime = 30;
 let logtype = false;
 const tokenRefreshMarginSeconds = 60;
-const arrCharger: string[] = [];
 
 function getRateLimitDelay(error: unknown): number {
   const errorRecord = isRecord(error) ? error : undefined;
@@ -183,6 +192,9 @@ function isRetryableError(error: unknown): error is RetryableError {
 class Easee extends Adapter {
   signalRConnection: signalR.HubConnection | null = null;
   signalRSubscribedChargers = new Set<string>();
+  observationVersions = new Map<string, ObservationVersion>();
+  observedStateWrites = new Map<string, Promise<unknown>>();
+  chargerIds: string[] = [];
   signalRSubscriptionPromises = new Map<string, Promise<void>>();
   unloading = false;
   apiRetryState = new Map<string, RetryState>();
@@ -219,7 +231,7 @@ class Easee extends Adapter {
       return;
     }
     const connection = new signalR.HubConnectionBuilder()
-      .withUrl("https://streams.easee.com/hubs/chargers", {
+      .withUrl("https://streams.easee.com/hubs/products", {
         accessTokenFactory: () => accessToken,
         httpClient: new AxiosSignalRHttpClient(),
         skipNegotiation: true,
@@ -230,36 +242,11 @@ class Easee extends Adapter {
     this.signalRConnection = connection;
 
     connection.on("ProductUpdate", (data: SignalRProductUpdate) => {
-      //haben einen neuen Wert über SignalR erhalten
-      const data_name = objEnum.getNameByEnum(data.id);
-      if (data_name == undefined) {
-        this.log.debug(`New SignalR-ID, possible new Value: ${data.id}`);
-        this.log.debug(JSON.stringify(data));
-      } else {
-        //Value is in ioBroker, update it
-        const tmpValueId = data.mid + data_name;
-        this.log.debug(
-          `New value over SignalR for: ${tmpValueId}, value: ${data.value}`,
-        );
-        switch (data.dataType) {
-          case 2:
-            data.value = data.value == "1";
-            break;
-          case 3:
-            data.value = parseFloat(String(data.value));
-            break;
-          case 4:
-            data.value = parseInt(String(data.value));
-            break;
-          //case 6: JSON
-        }
-        this.setStateAsync(tmpValueId, { val: data.value, ack: true }).catch(
-          (error) =>
-            this.log.warn(
-              `SignalR state update failed: ${errorMessage(error)}`,
-            ),
-        );
-      }
+      this.handleSignalRProductUpdate(data);
+    });
+
+    connection.onreconnected(() => {
+      this.resubscribeSignalRChargers(connection);
     });
 
     connection.onclose((error) => {
@@ -277,7 +264,7 @@ class Easee extends Adapter {
     try {
       await connection.start();
       this.signalRSubscribedChargers.clear();
-      for (const charger_id of arrCharger) {
+      for (const charger_id of this.chargerIds) {
         await this.subscribeChargerToSignalR(charger_id);
       }
     } catch (error) {
@@ -288,6 +275,79 @@ class Easee extends Adapter {
         `SignalR start failed; REST polling remains active: ${errorMessage(error)}`,
       );
       this.scheduleSignalRReconnect();
+    }
+  }
+
+  handleSignalRProductUpdate(data: SignalRProductUpdate): void {
+    const stateName = objEnum.getNameByEnum(data.id);
+    if (!stateName) {
+      this.log.debug(`New SignalR-ID, possible new Value: ${data.id}`);
+      this.log.debug(JSON.stringify(data));
+      return;
+    }
+    if (typeof data.mid !== "string" || !data.mid) {
+      return;
+    }
+
+    let value: ioBroker.StateValue = data.value;
+    switch (data.dataType) {
+      case 2: {
+        const normalized = normalizeBooleanObservation(value);
+        if (normalized === undefined) {
+          this.log.debug(
+            `SignalR observation ${data.id} for ${data.mid} had invalid boolean value ${JSON.stringify(data.value)}`,
+          );
+          return;
+        }
+        value = normalized;
+        break;
+      }
+      case 3: {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+          this.log.debug(
+            `SignalR observation ${data.id} for ${data.mid} had invalid number ${JSON.stringify(data.value)}`,
+          );
+          return;
+        }
+        value = number;
+        break;
+      }
+      case 4: {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+          this.log.debug(
+            `SignalR observation ${data.id} for ${data.mid} had invalid integer ${JSON.stringify(data.value)}`,
+          );
+          return;
+        }
+        value = Math.trunc(number);
+        break;
+      }
+    }
+
+    const stateId = `${data.mid}${stateName}`;
+    const timestamp = Date.parse(data.timestamp ?? "");
+    this.log.debug(
+      `SignalR observation ${data.id} for ${stateId}: raw=${JSON.stringify(data.value)}, converted=${JSON.stringify(value)}, timestamp=${data.timestamp ?? "missing"}`,
+    );
+    this.writeObservedState(
+      stateId,
+      value,
+      Number.isFinite(timestamp) ? timestamp : undefined,
+      "SignalR",
+    ).catch((error) =>
+      this.log.warn(`SignalR state update failed: ${errorMessage(error)}`),
+    );
+  }
+
+  resubscribeSignalRChargers(connection: signalR.HubConnection): void {
+    if (this.signalRConnection !== connection || this.unloading) {
+      return;
+    }
+    this.signalRSubscribedChargers.clear();
+    for (const chargerId of this.chargerIds) {
+      void this.subscribeChargerToSignalR(chargerId);
     }
   }
 
@@ -402,7 +462,7 @@ class Easee extends Adapter {
         });
 
         //reset all to start
-        arrCharger.length = 0;
+        this.chargerIds = [];
 
         if (this.config.signalR) {
           this.log.info("Starting SignalR");
@@ -749,13 +809,13 @@ class Easee extends Adapter {
           return;
         }
         //Prüfen ob wir das Object kennen
-        if (!arrCharger.includes(charger.id)) {
+        if (!this.chargerIds.includes(charger.id)) {
           //setzen als erstes alle Objekte
           await this.setAllStatusObjects(charger);
           await this.setAllConfigObjects(charger);
 
           //merken uns den charger
-          arrCharger.push(charger.id);
+          this.chargerIds.push(charger.id);
         }
         await this.subscribeChargerToSignalR(charger.id);
         if (this.unloading) {
@@ -782,7 +842,11 @@ class Easee extends Adapter {
           }
 
           //Setzen die Daten der Charger
-          await this.setNewStatusToCharger(charger, tmpChargerState);
+          await this.setNewStatusToCharger(
+            charger,
+            tmpChargerState.state,
+            tmpChargerState.timestamps,
+          );
 
           //Setzen die Config zum Charger
           await this.setConfigStatus(charger, tmpChargerConfig, tmpChargerSite);
@@ -1113,6 +1177,18 @@ class Easee extends Adapter {
                   );
                 });
             }, 500);
+          } else if (tmpControl[4] === "lockCablePermanently") {
+            if (typeof state.val !== "boolean") {
+              this.log.error(
+                `Invalid permanent cable lock value: ${state.val}`,
+              );
+              return;
+            }
+            void this.changeConfig(
+              tmpControl[2],
+              "lockCablePermanently",
+              state.val,
+            );
           } else if (
             tmpControl[4] == "costPerKwhExcludeVat" ||
             tmpControl[4] == "vat"
@@ -1202,168 +1278,136 @@ class Easee extends Adapter {
   async setNewStatusToCharger(
     charger: Charger,
     charger_states: ChargerObservationState,
+    timestamps: Partial<Record<string, number>> = {},
   ): Promise<void> {
     await this.setStateAsync(`${charger.id}.name`, charger.name, true);
-    await this.setStateAsync(
-      `${charger.id}.status.cableLocked`,
-      charger_states.cableLocked,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.chargerOpMode`,
-      charger_states.chargerOpMode,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.totalPower`,
-      charger_states.totalPower,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.wiFiRSSI`,
-      charger_states.wiFiRSSI,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.chargerFirmware`,
-      charger_states.chargerFirmware,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.reasonForNoCurrent`,
-      charger_states.reasonForNoCurrent,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.voltage`,
-      charger_states.voltage,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.outputCurrent`,
-      charger_states.outputCurrent,
-      true,
-    );
-    if (typeof charger_states.isOnline === "boolean") {
-      await this.setStateAsync(
-        `${charger.id}.status.isOnline`,
-        charger_states.isOnline,
-        true,
+    const statusFields: (keyof ChargerObservationState)[] = [
+      "cableLocked",
+      "chargerOpMode",
+      "totalPower",
+      "wiFiRSSI",
+      "chargerFirmware",
+      "reasonForNoCurrent",
+      "voltage",
+      "outputCurrent",
+      "isOnline",
+      "wiFiAPEnabled",
+      "ledMode",
+      "lifetimeEnergy",
+      "energyPerHour",
+      "inCurrentT2",
+      "inCurrentT3",
+      "inCurrentT4",
+      "inCurrentT5",
+      "inVoltageT1T2",
+      "inVoltageT1T3",
+      "inVoltageT1T4",
+      "inVoltageT1T5",
+      "inVoltageT2T3",
+      "inVoltageT2T4",
+      "inVoltageT2T5",
+      "inVoltageT3T4",
+      "inVoltageT3T5",
+      "inVoltageT4T5",
+    ];
+    for (const field of statusFields) {
+      await this.setObservedState(
+        `${charger.id}.status.${field}`,
+        charger_states[field],
+        timestamps[field],
+        "REST",
       );
     }
-    await this.setStateAsync(
-      `${charger.id}.status.wiFiAPEnabled`,
-      charger_states.wiFiAPEnabled,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.ledMode`,
-      charger_states.ledMode,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.lifetimeEnergy`,
-      charger_states.lifetimeEnergy,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.energyPerHour`,
-      charger_states.energyPerHour,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inCurrentT2`,
-      charger_states.inCurrentT2,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inCurrentT3`,
-      charger_states.inCurrentT3,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inCurrentT4`,
-      charger_states.inCurrentT4,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inCurrentT5`,
-      charger_states.inCurrentT5,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT1T2`,
-      charger_states.inVoltageT1T2,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT1T3`,
-      charger_states.inVoltageT1T3,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT1T4`,
-      charger_states.inVoltageT1T4,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT1T5`,
-      charger_states.inVoltageT1T5,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT2T3`,
-      charger_states.inVoltageT2T3,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT2T4`,
-      charger_states.inVoltageT2T4,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT2T5`,
-      charger_states.inVoltageT2T5,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT3T4`,
-      charger_states.inVoltageT3T4,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT3T5`,
-      charger_states.inVoltageT3T5,
-      true,
-    );
-    await this.setStateAsync(
-      `${charger.id}.status.inVoltageT4T5`,
-      charger_states.inVoltageT4T5,
-      true,
-    );
 
-    //wert der config wird nur hier gesendet
-    await this.setStateAsync(`${charger.id}.config.dynamicChargerCurrent`, {
-      val: charger_states.dynamicChargerCurrent,
-      ack: true,
-    });
-    await this.setStateAsync(`${charger.id}.config.dynamicCircuitCurrentP1`, {
-      val: charger_states.dynamicCircuitCurrentP1,
-      ack: true,
-    });
-    await this.setStateAsync(`${charger.id}.config.dynamicCircuitCurrentP2`, {
-      val: charger_states.dynamicCircuitCurrentP2,
-      ack: true,
-    });
-    await this.setStateAsync(`${charger.id}.config.dynamicCircuitCurrentP3`, {
-      val: charger_states.dynamicCircuitCurrentP3,
-      ack: true,
-    });
-    await this.setStateAsync(
-      `${charger.id}.config.smartCharging`,
-      charger_states.smartCharging,
-      true,
+    for (const field of [
+      "lockCablePermanently",
+      "dynamicChargerCurrent",
+      "dynamicCircuitCurrentP1",
+      "dynamicCircuitCurrentP2",
+      "dynamicCircuitCurrentP3",
+      "smartCharging",
+    ] as const) {
+      await this.setObservedState(
+        `${charger.id}.config.${field}`,
+        charger_states[field],
+        timestamps[field],
+        "REST",
+      );
+    }
+  }
+
+  async setObservedState(
+    stateId: string,
+    value: ioBroker.StateValue | undefined,
+    timestamp: number | undefined,
+    source: ObservationVersion["source"],
+  ): Promise<void> {
+    await this.writeObservedState(stateId, value, timestamp, source);
+  }
+
+  async writeObservedState(
+    stateId: string,
+    value: ioBroker.StateValue | undefined,
+    timestamp: number | undefined,
+    source: ObservationVersion["source"],
+  ): Promise<void> {
+    if (value === undefined || value === null) {
+      this.log.debug(`${source} observation for ${stateId} was empty; skipped`);
+      return;
+    }
+
+    const previousVersion = this.observationVersions.get(stateId);
+    const version: ObservationVersion = {
+      timestamp:
+        timestamp !== undefined && Number.isFinite(timestamp)
+          ? timestamp
+          : undefined,
+      source,
+    };
+    if (previousVersion) {
+      const stale =
+        version.timestamp !== undefined &&
+        previousVersion.timestamp !== undefined
+          ? version.timestamp <= previousVersion.timestamp
+          : source === "REST" || previousVersion.timestamp !== undefined;
+      if (stale) {
+        this.log.debug(
+          `${source} observation for ${stateId} was stale or incomparable; skipped (timestamp=${version.timestamp ?? "missing"}, previous=${previousVersion.timestamp ?? "missing"} from ${previousVersion.source})`,
+        );
+        return;
+      }
+    }
+
+    this.observationVersions.set(stateId, version);
+    this.log.debug(
+      `${source} observation for ${stateId} accepted: ${JSON.stringify(value)} (timestamp=${version.timestamp ?? "missing"})`,
     );
+    const previousWrite = this.observedStateWrites.get(stateId);
+    const write = (previousWrite ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        await this.setStateAsync(stateId, value, true);
+        this.log.debug(
+          `${source} observation value written to ${stateId}: ${JSON.stringify(value)}`,
+        );
+      });
+    this.observedStateWrites.set(stateId, write);
+    try {
+      await write;
+    } catch (error) {
+      if (this.observationVersions.get(stateId) === version) {
+        if (previousVersion) {
+          this.observationVersions.set(stateId, previousVersion);
+        } else {
+          this.observationVersions.delete(stateId);
+        }
+      }
+      throw error;
+    } finally {
+      if (this.observedStateWrites.get(stateId) === write) {
+        this.observedStateWrites.delete(stateId);
+      }
+    }
   }
 
   //Setzen alle Status für Config
@@ -1544,7 +1588,7 @@ class Easee extends Adapter {
   }
 
   // Lese den Charger aus
-  async getChargerState(charger_id: string): Promise<ChargerObservationState> {
+  async getChargerState(charger_id: string): Promise<ChargerObservationResult> {
     const response = await this.requestWithBackoff(
       `charger observations ${charger_id}`,
       () =>
@@ -1556,7 +1600,11 @@ class Easee extends Adapter {
     );
     this.log.debug(`Charger observations read for id: ${charger_id}`);
     this.log.debug(JSON.stringify(response.data));
-    return observationsToChargerState(response.data);
+    const result = observationsToChargerStateWithTimestamps(response.data);
+    this.log.debug(
+      `Charger observations mapped for ${charger_id}: ${JSON.stringify(result.state)}`,
+    );
+    return result;
   }
 
   async getChargerConfig(charger_id: string): Promise<ChargerConfig> {
@@ -2637,6 +2685,23 @@ class Easee extends Adapter {
       },
     );
     this.subscribeStates(`${charger.id}.config.ledStripBrightness`);
+
+    const lockCablePermanentlyId = `${charger.id}.config.lockCablePermanently`;
+    await this.setObjectNotExistsAsync(lockCablePermanentlyId, {
+      type: "state",
+      common: {
+        name: "Lock cable permanently setting",
+        type: "boolean",
+        role: "switch",
+        read: true,
+        write: true,
+      },
+      native: {},
+    });
+    await this.extendObjectAsync(lockCablePermanentlyId, {
+      common: { read: true, write: true },
+    });
+    this.subscribeStates(lockCablePermanentlyId);
 
     //"smartCharging": true,
     await this.setObjectNotExistsAsync(`${charger.id}.config.smartCharging`, {

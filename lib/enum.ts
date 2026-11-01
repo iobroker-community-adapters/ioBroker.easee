@@ -317,6 +317,7 @@
 */
 const easeeIds: Record<number, string> = {
   //config
+  30: ".config.lockCablePermanently",
   31: ".config.isEnabled",
   36: ".config.wiFiSSID",
   38: ".config.phaseMode",

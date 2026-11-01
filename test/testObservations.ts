@@ -7,6 +7,7 @@ import { describe, it } from "mocha";
 import {
   CHARGER_STATE_OBSERVATION_IDS,
   observationsToChargerState,
+  observationsToChargerStateWithTimestamps,
 } from "../lib/observations.ts";
 import * as easeeEnums from "../lib/enum.ts";
 
@@ -14,6 +15,7 @@ describe("Easee charger observations", () => {
   it("maps observations to the existing charger state fields", () => {
     const state = observationsToChargerState({
       observations: [
+        { id: 30, value: true },
         { id: 103, value: true },
         { id: 109, value: 3 },
         { id: 120, value: 7.4 },
@@ -22,6 +24,7 @@ describe("Easee charger observations", () => {
       ],
     });
     expect(state).to.include({
+      lockCablePermanently: true,
       cableLocked: true,
       chargerOpMode: 3,
       totalPower: 7.4,
@@ -62,18 +65,82 @@ describe("Easee charger observations", () => {
   });
 
   it("uses the current observation IDs", () => {
-    expect(CHARGER_STATE_OBSERVATION_IDS).to.include.members([80, 114, 250]);
+    expect(CHARGER_STATE_OBSERVATION_IDS).to.include.members([
+      30, 80, 114, 250,
+    ]);
     expect(CHARGER_STATE_OBSERVATION_IDS).not.to.include(82);
   });
 
-  it("routes smart-charging updates to the existing config state", () => {
+  it("normalizes supported cable lock boolean formats", () => {
+    for (const value of [true, 1, "1", "true"]) {
+      expect(
+        observationsToChargerState({
+          observations: [{ id: 103, value }],
+        }).cableLocked,
+      ).to.equal(true);
+    }
+    for (const value of [false, 0, "0", "false"]) {
+      expect(
+        observationsToChargerState({
+          observations: [{ id: 103, value }],
+        }).cableLocked,
+      ).to.equal(false);
+    }
+  });
+
+  it("does not normalize invalid cable lock observations to false", () => {
+    for (const value of [null, "yes", 2]) {
+      expect(
+        observationsToChargerState({
+          observations: [{ id: 103, value }],
+        }).cableLocked,
+      ).to.equal(undefined);
+    }
+  });
+
+  it("preserves source timestamps for valid observations", () => {
+    const timestamp = "2026-10-31T12:34:56.000Z";
+    const result = observationsToChargerStateWithTimestamps({
+      observations: [{ id: 103, value: true, timestamp }],
+    });
+    expect(result.timestamps.cableLocked).to.equal(Date.parse(timestamp));
+  });
+
+  it("leaves absent and null observations unset instead of clearing states", () => {
+    const state = observationsToChargerState({
+      observations: [
+        { id: 103, value: null },
+        { id: 120, value: undefined },
+      ],
+    });
+
+    expect(state.cableLocked).to.equal(undefined);
+    expect(state.totalPower).to.equal(undefined);
+  });
+
+  it("routes smart-charging and permanent cable-lock updates to config states", () => {
     expect(easeeEnums.getNameByEnum(102)).to.equal(".config.smartCharging");
+    expect(easeeEnums.getNameByEnum(30)).to.equal(
+      ".config.lockCablePermanently",
+    );
+  });
+
+  it("keeps the permanent lock setting distinct from the cable lock state", () => {
+    const state = observationsToChargerState({
+      observations: [
+        { id: 30, value: true },
+        { id: 103, value: false },
+      ],
+    });
+
+    expect(state.lockCablePermanently).to.equal(true);
+    expect(state.cableLocked).to.equal(false);
   });
 
   it("handles missing optional observations", () => {
     const state = observationsToChargerState({ observations: [] });
     expect(state.isOnline).to.equal(undefined);
     expect(state.voltage).to.equal(null);
-    expect(state.totalPower).to.equal(null);
+    expect(state.totalPower).to.equal(undefined);
   });
 });

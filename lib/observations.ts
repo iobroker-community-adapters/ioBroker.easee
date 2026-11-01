@@ -1,7 +1,7 @@
 "use strict";
 
 export const CHARGER_STATE_OBSERVATION_IDS = [
-  46, 48, 68, 80, 96, 102, 103, 109, 111, 112, 113, 114, 120, 122, 124, 132,
+  30, 46, 48, 68, 80, 96, 102, 103, 109, 111, 112, 113, 114, 120, 122, 124, 132,
   182, 183, 184, 185, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 250,
 ];
 
@@ -9,6 +9,7 @@ const STATE_FIELDS_BY_OBSERVATION_ID: Record<
   number,
   keyof ChargerObservationState
 > = {
+  30: "lockCablePermanently",
   46: "ledMode",
   48: "dynamicChargerCurrent",
   68: "wiFiAPEnabled",
@@ -54,6 +55,7 @@ const SUPPLY_VOLTAGE_FIELDS = [
 export interface ChargerObservation {
   id: number;
   value: unknown;
+  timestamp?: string;
 }
 
 /** Observation collection returned by the API. */
@@ -70,6 +72,8 @@ export interface ChargerObservationState {
   chargerFirmware: ioBroker.StateValue;
   reasonForNoCurrent: ioBroker.StateValue;
   smartCharging: ioBroker.StateValue;
+  /** Permanent cable-lock setting, distinct from the current lock state. */
+  lockCablePermanently: ioBroker.StateValue;
   cableLocked: ioBroker.StateValue;
   chargerOpMode: ioBroker.StateValue;
   dynamicCircuitCurrentP1: ioBroker.StateValue;
@@ -98,29 +102,57 @@ export interface ChargerObservationState {
   voltage: number | null;
 }
 
+/** Charger state values and their source observation timestamps. */
+export interface ChargerObservationResult {
+  /** Normalized values for the existing adapter states. */
+  state: ChargerObservationState;
+  /** Easee source timestamps, indexed by state field. */
+  timestamps: Partial<Record<string, number>>;
+}
+
 /**
  * Converts Easee API observations to the existing charger state fields.
  *
- * @param responseData
+ * @param responseData The response from the Easee observations API.
  */
 export function observationsToChargerState(
   responseData: ChargerObservationResponse | null | undefined,
 ): ChargerObservationState {
+  return observationsToChargerStateWithTimestamps(responseData).state;
+}
+
+/**
+ * Converts observations and retains each source timestamp for ordering.
+ *
+ * @param responseData The response from the Easee observations API.
+ */
+export function observationsToChargerStateWithTimestamps(
+  responseData: ChargerObservationResponse | null | undefined,
+): ChargerObservationResult {
   const observations = Array.isArray(responseData?.observations)
     ? responseData.observations
     : [];
-  const chargerState: Record<string, ioBroker.StateValue | undefined> =
-    Object.fromEntries(
-      Object.values(STATE_FIELDS_BY_OBSERVATION_ID).map((field) => [
-        field,
-        null,
-      ]),
-    );
+  const chargerState: Record<string, ioBroker.StateValue | undefined> = {};
+  const observationTimestamps: Record<string, number> = {};
 
   for (const observation of observations) {
     const field = STATE_FIELDS_BY_OBSERVATION_ID[observation.id];
-    if (field !== undefined && isStateValue(observation.value)) {
-      chargerState[field] = observation.value;
+    if (
+      field !== undefined &&
+      observation.value !== null &&
+      isStateValue(observation.value)
+    ) {
+      const value = normalizeObservationValue(
+        observation.id,
+        observation.value,
+      );
+      if (value !== undefined) {
+        chargerState[field] = value;
+        const timestamp = Date.parse(observation.timestamp ?? "");
+        if (Number.isFinite(timestamp)) {
+          observationTimestamps[field] = timestamp;
+        }
+      }
     }
   }
 
@@ -128,8 +160,13 @@ export function observationsToChargerState(
     (observation) => observation.id === 250,
   );
   if (cloudObservation) {
-    if (isStateValue(cloudObservation.value)) {
-      chargerState.isOnline = Boolean(cloudObservation.value);
+    const isOnline = normalizeBooleanObservation(cloudObservation.value);
+    if (isOnline !== undefined) {
+      chargerState.isOnline = isOnline;
+      const timestamp = Date.parse(cloudObservation.timestamp ?? "");
+      if (Number.isFinite(timestamp)) {
+        observationTimestamps.isOnline = timestamp;
+      }
     }
   }
   chargerState.voltage = null;
@@ -142,11 +179,47 @@ export function observationsToChargerState(
       value <= 300
     ) {
       chargerState.voltage = value;
+      const timestamp = observationTimestamps[field];
+      if (timestamp !== undefined) {
+        observationTimestamps.voltage = timestamp;
+      }
       break;
     }
   }
 
-  return chargerState as ChargerObservationState;
+  return {
+    state: chargerState as ChargerObservationState,
+    timestamps: observationTimestamps,
+  };
+}
+
+function normalizeObservationValue(
+  id: number,
+  value: ioBroker.StateValue,
+): ioBroker.StateValue | undefined {
+  return id === 30 || id === 103 ? normalizeBooleanObservation(value) : value;
+}
+
+/**
+ * Parses a boolean observation without treating unknown values as false.
+ *
+ * @param value The raw observation value.
+ */
+export function normalizeBooleanObservation(
+  value: unknown,
+): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized =
+    typeof value === "string" ? value.trim().toLowerCase() : value;
+  if (normalized === 1 || normalized === "1" || normalized === "true") {
+    return true;
+  }
+  if (normalized === 0 || normalized === "0" || normalized === "false") {
+    return false;
+  }
+  return undefined;
 }
 
 function isStateValue(value: unknown): value is ioBroker.StateValue {
