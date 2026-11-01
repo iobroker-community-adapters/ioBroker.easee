@@ -45,11 +45,11 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 3.1.0 (2026-11-01)
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
 - (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.
 - (Voodoo2man) Improved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.
-- (Voodoo2man) Restored charger state from valid observations sharing the latest source timestamp.
+- (Voodoo2man) Kept charger values aligned with the latest valid status.
 
 ### 3.0.0 (2026-10-23)
 - (Voodoo2man) Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required
@@ -68,12 +68,6 @@ This adapter would not have been possible without the great work of @Newan (http
 
 ### 1.0.10 (2023-07-27)
 * (Newan) fix version number
-
-### 1.0.9 (2023-07-27)
-* (walburgf)  changed API URL from api.easee.cloud to api.easee.com
-* (walburgf)  created addition parameter in admin config to reduce/steer logging information for user
-* (walburgf)  modified internationalization to use jsonConfig.json. this needs at least ioBroker.admin version 5
-* (walburgf)  added dependency to admin >=v5.1.28
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 
