@@ -1368,7 +1368,7 @@ class Easee extends Adapter {
       const stale =
         version.timestamp !== undefined &&
         previousVersion.timestamp !== undefined
-          ? version.timestamp <= previousVersion.timestamp
+          ? version.timestamp < previousVersion.timestamp
           : source === "REST" || previousVersion.timestamp !== undefined;
       if (stale) {
         this.log.debug(

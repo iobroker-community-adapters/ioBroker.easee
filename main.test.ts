@@ -514,6 +514,97 @@ describe("Easee polling regressions", () => {
     ).to.equal(false);
   });
 
+  it("accepts same-timestamp REST confirmations for config observations", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setNewStatusToCharger =
+      createAdapter.Easee.prototype.setNewStatusToCharger;
+    const timestamp = 200;
+    const charger = { id: "charger", name: "Charger" };
+    const timestamps = {
+      lockCablePermanently: timestamp,
+      dynamicChargerCurrent: timestamp,
+      smartCharging: timestamp,
+    };
+
+    await adapter.setNewStatusToCharger(
+      charger,
+      {
+        lockCablePermanently: true,
+        dynamicChargerCurrent: 6,
+        smartCharging: true,
+      },
+      timestamps,
+    );
+    adapter.setStateAsync.resetHistory();
+
+    await adapter.setNewStatusToCharger(
+      charger,
+      {
+        lockCablePermanently: false,
+        dynamicChargerCurrent: 8,
+        smartCharging: false,
+      },
+      timestamps,
+    );
+
+    expect(adapter.setStateAsync.args).to.deep.equal([
+      ["charger.name", "Charger", true],
+      ["charger.config.lockCablePermanently", false, true],
+      ["charger.config.dynamicChargerCurrent", 8, true],
+      ["charger.config.smartCharging", false, true],
+    ]);
+  });
+
+  it("accepts same-timestamp SignalR confirmations for config observations", async () => {
+    const adapter = createAdapterHarness();
+    const timestamp = new Date(200).toISOString();
+    const observations = [
+      {
+        id: 30,
+        stateId: "charger.config.lockCablePermanently",
+        dataType: 2,
+        value: "false",
+      },
+      {
+        id: 48,
+        stateId: "charger.config.dynamicChargerCurrent",
+        dataType: 3,
+        value: "8",
+      },
+      {
+        id: 102,
+        stateId: "charger.config.smartCharging",
+        dataType: 2,
+        value: "false",
+      },
+    ];
+    for (const observation of observations) {
+      adapter.observationVersions.set(observation.stateId, {
+        timestamp: Date.parse(timestamp),
+        source: "REST",
+      });
+      adapter.handleSignalRProductUpdate({
+        id: observation.id,
+        mid: "charger",
+        dataType: observation.dataType,
+        timestamp,
+        value: observation.value,
+      });
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(adapter.setStateAsync.args).to.deep.equal([
+      ["charger.config.lockCablePermanently", false, true],
+      ["charger.config.dynamicChargerCurrent", 8, true],
+      ["charger.config.smartCharging", false, true],
+    ]);
+    for (const observation of observations) {
+      expect(
+        adapter.observationVersions.get(observation.stateId),
+      ).to.deep.equal({ timestamp: Date.parse(timestamp), source: "SignalR" });
+    }
+  });
+
   it("ignores a SignalR event with an older source timestamp", () => {
     const adapter = createAdapterHarness();
     adapter.observationVersions.set("charger.status.cableLocked", {
