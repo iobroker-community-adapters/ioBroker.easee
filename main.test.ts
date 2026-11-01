@@ -807,6 +807,21 @@ describe("Easee polling regressions", () => {
     expect(adapter.log.error.calledOnce).to.equal(true);
   });
 
+  it("logs successful config updates at debug level with charger and setting context", async () => {
+    const adapter = createAdapterHarness();
+    const post = sinon.stub(axios, "post").resolves({ data: {} });
+
+    await adapter.changeConfig("charger", "lockCablePermanently", true);
+
+    expect(post.calledOnce).to.equal(true);
+    expect(adapter.log.info.called).to.equal(false);
+    expect(
+      adapter.log.debug.calledWith(
+        "Config update successful for charger charger (lockCablePermanently)",
+      ),
+    ).to.equal(true);
+  });
+
   it("posts the permanent cable-lock setting and does not confirm failed updates", async () => {
     const adapter = createAdapterHarness();
     const post = sinon.stub(axios, "post").rejects(new Error("request failed"));

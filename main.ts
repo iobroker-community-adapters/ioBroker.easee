@@ -1808,7 +1808,9 @@ class Easee extends Adapter {
         { headers: { Authorization: `Bearer ${accessToken}` } },
       )
       .then((response) => {
-        this.log.info("Config update successful");
+        this.log.debug(
+          `Config update successful for charger ${id} (${configvalue})`,
+        );
         this.log.debug(JSON.stringify(response.data));
       })
       .catch((error) => {
