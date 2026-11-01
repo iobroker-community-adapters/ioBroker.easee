@@ -49,7 +49,6 @@ This adapter would not have been possible without the great work of @Newan (http
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
 - (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.
 - (Voodoo2man) Improved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.
-- (Voodoo2man) Kept charger values aligned with the latest valid status.
 
 ### 3.0.0 (2026-10-23)
 - (Voodoo2man) Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required
