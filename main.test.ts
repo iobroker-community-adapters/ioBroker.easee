@@ -63,6 +63,9 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
   adapter.circuitMaxCurrentSequence = 0;
   adapter.dynamicCircuitCurrentTimers = new Set();
   adapter.signalRSubscribedChargers = new Set();
+  adapter.observationVersions = new Map();
+  adapter.observedStateWrites = new Map();
+  adapter.chargerIds = [];
   adapter.signalRSubscriptionPromises = new Map();
   adapter.sessionChargers = [];
   adapter.sessionCursor = 0;
@@ -396,6 +399,260 @@ describe("Easee polling regressions", () => {
     ).to.equal(false);
   });
 
+  it("normalizes SignalR cable-lock events and isolates chargers", async () => {
+    const adapter = createAdapterHarness();
+
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-a",
+      dataType: 2,
+      value: true,
+    });
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-b",
+      dataType: 2,
+      value: "1",
+    });
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-a",
+      dataType: 2,
+      value: "false",
+    });
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-b",
+      dataType: 2,
+      value: "true",
+    });
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-b",
+      dataType: 2,
+      value: "0",
+    });
+    await Promise.all([...adapter.observedStateWrites.values()]);
+
+    expect(adapter.setStateAsync.args).to.deep.equal([
+      ["charger-a.status.cableLocked", true, true],
+      ["charger-b.status.cableLocked", true, true],
+      ["charger-a.status.cableLocked", false, true],
+      ["charger-b.status.cableLocked", true, true],
+      ["charger-b.status.cableLocked", false, true],
+    ]);
+  });
+
+  it("serializes SignalR updates to the same state in arrival order", async () => {
+    const adapter = createAdapterHarness();
+    let releaseFirstWrite: (() => void) | undefined;
+    const write = sinon.stub();
+    write.onFirstCall().returns(
+      new Promise<void>((resolve) => {
+        releaseFirstWrite = resolve;
+      }),
+    );
+    write.onSecondCall().resolves();
+    adapter.setStateAsync = write;
+
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-a",
+      dataType: 2,
+      value: true,
+    });
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-a",
+      dataType: 2,
+      value: false,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(write.callCount).to.equal(1);
+    releaseFirstWrite!();
+    await Promise.all([...adapter.observedStateWrites.values()]);
+
+    expect(write.args).to.deep.equal([
+      ["charger-a.status.cableLocked", true, true],
+      ["charger-a.status.cableLocked", false, true],
+    ]);
+  });
+
+  it("ignores a stale REST observation after a SignalR update", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setNewStatusToCharger =
+      createAdapter.Easee.prototype.setNewStatusToCharger;
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger",
+      dataType: 2,
+      timestamp: new Date(200).toISOString(),
+      value: "true",
+    });
+    await Promise.all([...adapter.observedStateWrites.values()]);
+
+    await adapter.setNewStatusToCharger(
+      { id: "charger", name: "Charger" },
+      { cableLocked: false },
+      { cableLocked: 100 },
+    );
+
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger.status.cableLocked",
+        true,
+        true,
+      ),
+    ).to.equal(true);
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger.status.cableLocked",
+        false,
+        true,
+      ),
+    ).to.equal(false);
+  });
+
+  it("accepts same-timestamp REST confirmations for config observations", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setNewStatusToCharger =
+      createAdapter.Easee.prototype.setNewStatusToCharger;
+    const timestamp = 200;
+    const charger = { id: "charger", name: "Charger" };
+    const timestamps = {
+      lockCablePermanently: timestamp,
+      dynamicChargerCurrent: timestamp,
+      smartCharging: timestamp,
+    };
+
+    await adapter.setNewStatusToCharger(
+      charger,
+      {
+        lockCablePermanently: true,
+        dynamicChargerCurrent: 6,
+        smartCharging: true,
+      },
+      timestamps,
+    );
+    adapter.setStateAsync.resetHistory();
+
+    await adapter.setNewStatusToCharger(
+      charger,
+      {
+        lockCablePermanently: false,
+        dynamicChargerCurrent: 8,
+        smartCharging: false,
+      },
+      timestamps,
+    );
+
+    expect(adapter.setStateAsync.args).to.deep.equal([
+      ["charger.name", "Charger", true],
+      ["charger.config.lockCablePermanently", false, true],
+      ["charger.config.dynamicChargerCurrent", 8, true],
+      ["charger.config.smartCharging", false, true],
+    ]);
+  });
+
+  it("accepts same-timestamp SignalR confirmations for config observations", async () => {
+    const adapter = createAdapterHarness();
+    const timestamp = new Date(200).toISOString();
+    const observations = [
+      {
+        id: 30,
+        stateId: "charger.config.lockCablePermanently",
+        dataType: 2,
+        value: "false",
+      },
+      {
+        id: 48,
+        stateId: "charger.config.dynamicChargerCurrent",
+        dataType: 3,
+        value: "8",
+      },
+      {
+        id: 102,
+        stateId: "charger.config.smartCharging",
+        dataType: 2,
+        value: "false",
+      },
+    ];
+    for (const observation of observations) {
+      adapter.observationVersions.set(observation.stateId, {
+        timestamp: Date.parse(timestamp),
+        source: "REST",
+      });
+      adapter.handleSignalRProductUpdate({
+        id: observation.id,
+        mid: "charger",
+        dataType: observation.dataType,
+        timestamp,
+        value: observation.value,
+      });
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(adapter.setStateAsync.args).to.deep.equal([
+      ["charger.config.lockCablePermanently", false, true],
+      ["charger.config.dynamicChargerCurrent", 8, true],
+      ["charger.config.smartCharging", false, true],
+    ]);
+    for (const observation of observations) {
+      expect(
+        adapter.observationVersions.get(observation.stateId),
+      ).to.deep.equal({ timestamp: Date.parse(timestamp), source: "SignalR" });
+    }
+  });
+
+  it("ignores a SignalR event with an older source timestamp", () => {
+    const adapter = createAdapterHarness();
+    adapter.observationVersions.set("charger.status.cableLocked", {
+      timestamp: 200,
+      source: "REST",
+    });
+
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger",
+      dataType: 2,
+      timestamp: new Date(100).toISOString(),
+      value: "false",
+    });
+
+    expect(adapter.setStateAsync.called).to.equal(false);
+    expect(
+      adapter.observationVersions.get("charger.status.cableLocked"),
+    ).to.deep.equal({ timestamp: 200, source: "REST" });
+  });
+
+  it("does not clear cable-lock state when REST omits observation 103", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setNewStatusToCharger =
+      createAdapter.Easee.prototype.setNewStatusToCharger;
+
+    await adapter.setNewStatusToCharger({ id: "charger", name: "Charger" }, {});
+
+    expect(
+      adapter.setStateAsync.calledWith("charger.status.cableLocked"),
+    ).to.equal(false);
+  });
+
+  it("resubscribes all known chargers after SignalR reconnects", () => {
+    const adapter = createAdapterHarness();
+    const connection = {};
+    const subscribe = sinon.stub();
+    adapter.signalRConnection = connection;
+    adapter.chargerIds = ["charger-a", "charger-b"];
+    adapter.signalRSubscribedChargers.add("charger-a");
+    adapter.subscribeChargerToSignalR = subscribe;
+
+    adapter.resubscribeSignalRChargers(connection);
+
+    expect(adapter.signalRSubscribedChargers.size).to.equal(0);
+    expect(subscribe.args).to.deep.equal([["charger-a"], ["charger-b"]]);
+  });
+
   it("subscribes a charger discovered after SignalR connected", async () => {
     const adapter = createAdapterHarness();
     const send = sinon.stub().resolves();
@@ -414,6 +671,156 @@ describe("Easee polling regressions", () => {
         true,
       ),
     ).to.equal(true);
+  });
+
+  it("writes the normalized cable-lock value through the REST update path", async () => {
+    const adapter = createAdapterHarness();
+    adapter.getChargerState = createAdapter.Easee.prototype.getChargerState;
+    adapter.setNewStatusToCharger =
+      createAdapter.Easee.prototype.setNewStatusToCharger;
+    const timestamp = "2026-10-30T12:34:56.000Z";
+    sinon.stub(axios, "get").resolves({
+      data: {
+        observations: [
+          { id: 30, value: "true", timestamp },
+          { id: 103, value: "1", timestamp },
+        ],
+      },
+    });
+
+    const result = await adapter.getChargerState("charger-1");
+    await adapter.setNewStatusToCharger(
+      { id: "charger-1", name: "Charger 1" },
+      result.state,
+      result.timestamps,
+    );
+
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger-1.status.cableLocked",
+        true,
+        true,
+      ),
+    ).to.equal(true);
+    expect(
+      adapter.observationVersions.get("charger-1.status.cableLocked"),
+    ).to.deep.equal({ timestamp: Date.parse(timestamp), source: "REST" });
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger-1.config.lockCablePermanently",
+        true,
+        true,
+      ),
+    ).to.equal(true);
+  });
+
+  it("keeps REST polling active when SignalR is disabled", async () => {
+    const adapter = createAdapterHarness();
+    adapter.config = { signalR: false };
+    adapter.refreshToken = sinon.stub().resolves();
+    adapter.getAllCharger = sinon.stub().resolves([{ id: "charger" }]);
+    adapter.setAllStatusObjects = sinon.stub().resolves();
+    adapter.setAllConfigObjects = sinon.stub().resolves();
+    adapter.subscribeChargerToSignalR = sinon.stub().resolves();
+    adapter.getChargerState = sinon
+      .stub()
+      .resolves({ state: {}, timestamps: {} });
+    adapter.getChargerConfig = sinon.stub().resolves({});
+    adapter.getChargerSite = sinon.stub().resolves({});
+    adapter.setNewStatusToCharger = sinon.stub().resolves();
+    adapter.setConfigStatus = sinon.stub().resolves();
+
+    await adapter.readAllStates();
+    expect(adapter.getChargerState.calledOnceWithExactly("charger")).to.equal(
+      true,
+    );
+    await new Promise<void>((resolve) => adapter.onUnload(resolve));
+  });
+
+  it("exposes the permanent cable lock setting as a separate writable config state", async () => {
+    const adapter = createAdapterHarness();
+    const setObjectNotExistsAsync = sinon.stub().resolves();
+    adapter.setObjectNotExistsAsync = setObjectNotExistsAsync;
+    adapter.extendObjectAsync = sinon.stub().resolves();
+    adapter.subscribeStates = sinon.stub();
+
+    await adapter.setAllConfigObjects({ id: "charger", name: "Charger" });
+
+    expect(
+      setObjectNotExistsAsync.calledWith(
+        "charger.config.lockCablePermanently",
+        sinon.match({
+          common: sinon.match({
+            type: "boolean",
+            read: true,
+            write: true,
+          }),
+        }),
+      ),
+    ).to.equal(true);
+    expect(
+      adapter.subscribeStates.calledWithExactly(
+        "charger.config.lockCablePermanently",
+      ),
+    ).to.equal(true);
+  });
+
+  it("updates only access metadata on an existing permanent cable lock state", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+    const extendObjectAsync = sinon.stub().resolves();
+    adapter.extendObjectAsync = extendObjectAsync;
+    adapter.subscribeStates = sinon.stub();
+
+    await adapter.setAllConfigObjects({ id: "charger", name: "Charger" });
+
+    expect(
+      extendObjectAsync.calledWithExactly(
+        "charger.config.lockCablePermanently",
+        { common: { read: true, write: true } },
+      ),
+    ).to.equal(true);
+  });
+
+  it("sends boolean permanent cable-lock changes through charger settings", () => {
+    const adapter = createAdapterHarness();
+    const changeConfig = sinon.stub().resolves();
+    adapter.changeConfig = changeConfig;
+
+    adapter.onStateChange("easee.0.charger.config.lockCablePermanently", {
+      val: true,
+      ack: false,
+    });
+    adapter.onStateChange("easee.0.charger.config.lockCablePermanently", {
+      val: false,
+      ack: false,
+    });
+    adapter.onStateChange("easee.0.charger.config.lockCablePermanently", {
+      val: 1,
+      ack: false,
+    });
+
+    expect(changeConfig.args).to.deep.equal([
+      ["charger", "lockCablePermanently", true],
+      ["charger", "lockCablePermanently", false],
+    ]);
+    expect(adapter.log.error.calledOnce).to.equal(true);
+  });
+
+  it("posts the permanent cable-lock setting and does not confirm failed updates", async () => {
+    const adapter = createAdapterHarness();
+    const post = sinon.stub(axios, "post").rejects(new Error("request failed"));
+
+    await adapter.changeConfig("charger", "lockCablePermanently", true);
+
+    expect(post.calledOnce).to.equal(true);
+    expect(post.firstCall.args[0]).to.equal(
+      "https://api.easee.com/api/chargers/charger/settings",
+    );
+    expect(post.firstCall.args[1]).to.deep.equal({
+      lockCablePermanently: true,
+    });
+    expect(adapter.setStateAsync.called).to.equal(false);
   });
 
   it("bounds charger observation requests with a finite timeout", async () => {
