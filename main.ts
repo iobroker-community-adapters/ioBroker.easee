@@ -59,6 +59,11 @@ interface ChargingSessionDetails {
   authToken?: string | null;
 }
 
+interface ChargingSessionStart {
+  timestamp: number;
+  reliable: boolean;
+}
+
 interface RetryState {
   delay: number;
   retryAt: number;
@@ -201,6 +206,10 @@ class Easee extends Adapter {
   observationVersions = new Map<string, ObservationVersion>();
   observedStateWrites = new Map<string, Promise<unknown>>();
   lastChargerOpModes = new Map<string, number>();
+  chargerSessionStarts = new Map<string, ChargingSessionStart>();
+  chargerSessionGenerations = new Map<string, number>();
+  chargerSessionAuthTokenResolved = new Set<string>();
+  pendingSessionAuthTokenLookups = new Map<string, Promise<void>>();
   chargerIds: string[] = [];
   chargerNameQueue: Promise<void> = Promise.resolve();
   chargerNameVersions = new Map<string, number>();
@@ -1403,7 +1412,11 @@ class Easee extends Adapter {
     }
 
     this.observationVersions.set(stateId, version);
-    let chargingStartChargerId: string | undefined;
+    let chargingStartCharger:
+      { chargerId: string; generation: number } | undefined;
+    let completedSessionLookup:
+      | { chargerId: string; sessionStartAt?: number; generation: number }
+      | undefined;
     const chargerOpModeSuffix = ".status.chargerOpMode";
     if (
       stateId.endsWith(chargerOpModeSuffix) &&
@@ -1416,8 +1429,44 @@ class Easee extends Adapter {
         .pop();
       if (chargerId) {
         const previousOpMode = this.lastChargerOpModes.get(chargerId);
+        if (value === 2 || value === 6 || value === 7) {
+          if (previousOpMode === 1) {
+            this.chargerSessionStarts.set(chargerId, {
+              timestamp: version.timestamp ?? Date.now(),
+              reliable: true,
+            });
+          }
+        }
         if (value === 3 && previousOpMode !== 3) {
-          chargingStartChargerId = chargerId;
+          if (!this.chargerSessionStarts.has(chargerId)) {
+            this.chargerSessionStarts.set(chargerId, {
+              timestamp: version.timestamp ?? Date.now(),
+              reliable: previousOpMode === 1,
+            });
+          }
+          const generation =
+            (this.chargerSessionGenerations.get(chargerId) ?? 0) + 1;
+          this.chargerSessionGenerations.set(chargerId, generation);
+          this.chargerSessionAuthTokenResolved.delete(chargerId);
+          chargingStartCharger = { chargerId, generation };
+        }
+        if (
+          (value === 4 && previousOpMode === 3) ||
+          (value === 1 && (previousOpMode === 3 || previousOpMode === 4))
+        ) {
+          if (!this.chargerSessionAuthTokenResolved.has(chargerId)) {
+            const sessionStart = this.chargerSessionStarts.get(chargerId);
+            completedSessionLookup = {
+              chargerId,
+              sessionStartAt: sessionStart?.reliable
+                ? sessionStart.timestamp
+                : undefined,
+              generation: this.chargerSessionGenerations.get(chargerId) ?? 0,
+            };
+          }
+        }
+        if (value === 1) {
+          this.chargerSessionStarts.delete(chargerId);
         }
         this.lastChargerOpModes.set(chargerId, value);
       }
@@ -1437,8 +1486,15 @@ class Easee extends Adapter {
     this.observedStateWrites.set(stateId, write);
     try {
       await write;
-      if (chargingStartChargerId) {
-        void this.updateCurrentSessionAuthToken(chargingStartChargerId);
+      if (chargingStartCharger) {
+        await this.writeSessionAuthTokenIfCurrent(
+          chargingStartCharger.chargerId,
+          "",
+          chargingStartCharger.generation,
+        );
+      }
+      if (completedSessionLookup) {
+        this.queueCompletedSessionAuthTokenLookup(completedSessionLookup);
       }
     } catch (error) {
       if (this.observationVersions.get(stateId) === version) {
@@ -1797,16 +1853,77 @@ class Easee extends Adapter {
     return response.data;
   }
 
-  async updateCurrentSessionAuthToken(chargerId: string): Promise<void> {
+  async writeSessionAuthTokenIfCurrent(
+    chargerId: string,
+    authToken: string,
+    generation: number,
+  ): Promise<void> {
     const stateId = `${chargerId}.status.authToken`;
+    const previous = this.observedStateWrites.get(stateId);
+    const write = (previous ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        if (
+          this.unloading ||
+          this.chargerSessionGenerations.get(chargerId) !== generation
+        ) {
+          return;
+        }
+        await this.setStateAsync(stateId, authToken, true);
+      });
+    this.observedStateWrites.set(stateId, write);
     try {
-      await this.setStateAsync(stateId, "", true);
+      await write;
+    } finally {
+      if (this.observedStateWrites.get(stateId) === write) {
+        this.observedStateWrites.delete(stateId);
+      }
+    }
+  }
+
+  queueCompletedSessionAuthTokenLookup(lookup: {
+    chargerId: string;
+    sessionStartAt?: number;
+    generation: number;
+  }): void {
+    const previous = this.pendingSessionAuthTokenLookups.get(lookup.chargerId);
+    const runLookup = async (): Promise<void> => {
+      if (
+        this.unloading ||
+        this.chargerSessionGenerations.get(lookup.chargerId) !==
+          lookup.generation ||
+        this.chargerSessionAuthTokenResolved.has(lookup.chargerId)
+      ) {
+        return;
+      }
+      await this.updateCurrentSessionAuthToken(
+        lookup.chargerId,
+        lookup.sessionStartAt,
+        lookup.generation,
+      );
+    };
+    const request = previous
+      ? previous.catch(() => undefined).then(runLookup)
+      : runLookup();
+    this.pendingSessionAuthTokenLookups.set(lookup.chargerId, request);
+  }
+
+  async updateCurrentSessionAuthToken(
+    chargerId: string,
+    sessionStartAt: number | undefined,
+    generation: number,
+  ): Promise<void> {
+    try {
       if (this.unloading) {
         return;
       }
 
       const to = new Date();
-      const from = new Date(to.getTime() - 60 * 60 * 1000);
+      const from = new Date(
+        sessionStartAt !== undefined
+          ? sessionStartAt - 5 * 60 * 1000
+          : to.getTime() - 24 * 60 * 60 * 1000,
+      );
       const response = await this.requestWithBackoff(
         `charger session auth ${chargerId}`,
         () =>
@@ -1818,33 +1935,58 @@ class Easee extends Adapter {
             },
           ),
       );
-      if (this.unloading || !Array.isArray(response.data)) {
+      if (
+        this.unloading ||
+        this.chargerSessionGenerations.get(chargerId) !== generation ||
+        !Array.isArray(response.data)
+      ) {
         return;
       }
 
-      const activeSession = response.data
+      const completedSession = response.data
         .filter(
           (session) =>
-            session?.isComplete === false &&
+            session?.isComplete === true &&
             typeof session.authToken === "string" &&
             session.authToken.trim().length > 0,
         )
+        .filter((session) => {
+          if (sessionStartAt === undefined) {
+            return true;
+          }
+          const carConnectedAt = Date.parse(session.carConnected ?? "");
+          return (
+            Number.isFinite(carConnectedAt) &&
+            carConnectedAt >= sessionStartAt - 5 * 60 * 1000
+          );
+        })
         .sort(
           (first, second) =>
             Date.parse(second.carConnected ?? "") -
             Date.parse(first.carConnected ?? ""),
         )[0];
-      if (!activeSession?.authToken) {
+      if (!completedSession?.authToken) {
         this.log.debug(
-          `No active charging session authorization token returned for ${chargerId}`,
+          `No completed charging session authorization token returned for ${chargerId}`,
         );
         return;
       }
 
-      this.log.debug(
-        `Received an authorization token for the current charging session of ${chargerId}`,
+      if (this.chargerSessionGenerations.get(chargerId) !== generation) {
+        return;
+      }
+      await this.writeSessionAuthTokenIfCurrent(
+        chargerId,
+        completedSession.authToken,
+        generation,
       );
-      await this.setStateAsync(stateId, activeSession.authToken, true);
+      if (this.chargerSessionGenerations.get(chargerId) !== generation) {
+        return;
+      }
+      this.chargerSessionAuthTokenResolved.add(chargerId);
+      this.log.debug(
+        `Received an authorization token for the completed charging session of ${chargerId}`,
+      );
     } catch (error) {
       if (!this.unloading && !isRetryableError(error)) {
         this.log.warn(

@@ -18,7 +18,7 @@ Adapter to connect Easee Wallbox
 
 ## Help
 
-`status.authToken` is read once when the Charging operation mode is first observed after startup or entered later (Easee Observation 109). The adapter requests the recent charging session and shows its authorization token when Easee provides one. The state is cleared at adapter startup and each detected charging start; it remains empty if no active session token is available.
+`status.authToken` is cleared when charging starts (Easee Observation 109) and is populated from the completed charging session when charging stops. The adapter checks the completed session when the charger enters Completed mode or the car disconnects; the value remains empty if Easee has not finalized the session or returned an authorization token.
 
 `status.chargerOpMode` reports the charger's operation mode (Easee Observation 109):
 
@@ -52,6 +52,7 @@ This adapter would not have been possible without the great work of @Newan (http
 ### **WORK IN PROGRESS**
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
 - (Voodoo2man) Replaced the adapter icon.
+- (Voodoo2man) Clear the authorization token when charging starts and fetch it from the completed session after charging stops.
 
 ### 3.1.0 (2026-11-01)
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
