@@ -1,8 +1,21 @@
 {
   "common": {
     "name": "easee",
-    "version": "3.1.0",
+    "version": "3.2.0",
     "news": {
+      "3.2.0": {
+        "en": "Added the ability to change the charger name through the writable `<chargerId>.name` state.\nReplaced the adapter icon.\nAdded an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.",
+        "de": "Der Name der Ladestation kann über den beschreibbaren Datenpunkt `<chargerId>.name` geändert werden.\nDas Adaptersymbol wurde ersetzt.\nEin Datenpunkt für das Autorisierungstoken wurde hinzugefügt. Er wird bei Ladebeginn geleert und nach der Sitzung gesetzt; der Name des Schlüsselinhabers steht in einem separaten Datenpunkt.",
+        "ru": "Добавлена возможность изменения имени зарядного устройства через доступное для записи состояние <chargerId>`.name`.\nЗаменен значок адаптера.\nДобавлена точка данных токена авторизации, которая удаляется при начале оплаты и устанавливается после сеанса с отдельной точкой данных имени владельца.",
+        "pt": "Foi adicionada a opção de mudar o nome do carregador pelo estado gravável `<chargerId>.name.\nTrocou o ícone do adaptador.\nFoi adicionado um ponto de dados de token de autorização que é apagado no início da cobrança e definido após a sessão.",
+        "nl": "De mogelijkheid toegevoegd om de naam van de oplader te wijzigen via de beschrijfbare status `<chargerId>.name`.\nHet adapterpictogram is vervangen.\nEen datapunt met autorisatietoken toegevoegd dat wordt gewist wanneer het opladen wordt gestart en ingesteld na de sessie, met een apart gegevenspunt met de gebruikersnaam.",
+        "fr": "Ajout de la possibilité de changer le nom du chargeur via l'état « <chargerId>.name » inscriptible.\nL'icône de l'adaptateur a été remplacée.\nAjout d'un point d'autorisation qui est effacé au début de la recharge et défini après la session, avec un point de données distinct au nom du propriétaire.",
+        "it": "Aggiunta la possibilità di cambiare il nome del caricatore scrivendo «<chargerId>.name».\nCambiata l'icona adattatore.\nAggiunto un datapoint con token di autorizzazione che viene cancellato all'inizio della ricarica e impostato dopo la sessione",
+        "es": "Se ha añadido la posibilidad de cambiar el nombre del cargador por el estado escribible <chargerId>`.name`.\nSustituyó el icono adaptador.\nSe ha añadido un punto de datos de token de autorización que se borra al iniciar el cobro y se establece tras la sesión, con otro punto de datos con el nombre del propietario.",
+        "pl": "Dodano możliwość zmiany nazwy ładowarki poprzez zapisywny stan `<chargerId>.name`.\nWymieniono ikonę adaptera.\nDodano punkt danych tokena autoryzacji, który jest usuwany po rozpoczęciu ładowania i ustawiany po sesji, z oddzielnym punktem danych o nazwie właściciela.",
+        "uk": "Додана можливість змінювати ім'я зарядного пристрою через стан `<chargerId>.name`, який можна записати.\nЗамінено значок адаптера.\nДодано точку даних токена авторизації, який очищається під час початку зарядки та встановлюється після сеансу, з окремим пунктом даних імені власника.",
+        "zh-cn": "增加了通过可写的 `<chargerId>.name`状态更改充电器名称的功能。\n已更换适配器图标。\n添加了授权令牌数据点，该数据点在开始充电时清除，并在会话结束后设置，并带有单独的所有者姓名数据点。"
+      },
       "3.1.0": {
         "en": "Corrected cable-lock status reporting and improved the reliability of charger status updates.\nAdded a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.\nImproved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.",
         "de": "Die Meldung zum Kabelverriegelungsstatus wurde korrigiert und die Aktualisierung des Ladestatus zuverlässiger gemacht.\nEine lesbare und änderbare Einstellung für die dauerhafte Kabelverriegelung wurde ergänzt; sie ist vom tatsächlichen Verriegelungsstatus getrennt.\nDie Wiederherstellung der Live-Aktualisierungen nach Verbindungsunterbrechungen wurde verbessert. Regelmäßige Statusaktualisierungen bleiben auch bei deaktivierten Live-Aktualisierungen verfügbar.",
@@ -80,19 +93,6 @@
         "pl": "wersja poprawna",
         "uk": "фіксувати номер версії",
         "zh-cn": "fix"
-      },
-      "1.0.9": {
-        "en": "many changed by walburgf",
-        "de": "viele geändert von walburgf",
-        "ru": "много изменено walburgf",
-        "pt": "muitos mudou por walburgf",
-        "nl": "veel veranderd door walburg",
-        "fr": "beaucoup changés par walburgf",
-        "it": "molti cambiato da walburgf",
-        "es": "muchos cambiaron por walburgf",
-        "pl": "wielu z nich zmieniało się na walburgf",
-        "uk": "багато змінено walburgf",
-        "zh-cn": "倒数的改变"
       }
     },
     "titleLang": {

@@ -49,7 +49,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 3.2.0 (2026-11-07)
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
 - (Voodoo2man) Replaced the adapter icon.
 - (Voodoo2man) Added an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.
@@ -73,9 +73,6 @@ This adapter would not have been possible without the great work of @Newan (http
 - (iobroker-bot) Adapter requires node.js >= 22 now.
 - (copilot) Adapter requires js-controller >= 7.2.2 now
 - (copilot) Adapter requires admin >= 7.7.22 now
-
-### 1.0.10 (2023-07-27)
-* (Newan) fix version number
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 

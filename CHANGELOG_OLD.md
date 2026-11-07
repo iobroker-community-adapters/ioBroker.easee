@@ -1,4 +1,7 @@
 # Older changes
+## 1.0.10 (2023-07-27)
+* (Newan) fix version number
+
 ## 1.0.9 (2023-07-27)
 * (walburgf)  changed API URL from api.easee.cloud to api.easee.com
 * (walburgf)  created addition parameter in admin config to reduce/steer logging information for user
