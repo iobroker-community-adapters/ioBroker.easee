@@ -14,7 +14,7 @@
 
 ## easee adapter for ioBroker
 
-Adapter to connect Easee Wallbox
+Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 ## Help
 
