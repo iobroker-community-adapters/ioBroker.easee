@@ -32,6 +32,8 @@ Adapter to connect Easee Wallbox
 | 7 | Awaiting Authentication | The charger is waiting for authentication. |
 | 8 | De-authenticating | The charger is de-authenticating. |
 
+The `<chargerId>.name` state can be written to change the charger name in Easee. The adapter reads the charger's circuit and submits its complete charger list to Easee, then confirms the state only when the name is returned by the API. The Easee account must have permission to update chargers on the site. Since Easee does not document all update semantics, test this feature on a test site first and check the adapter log if the update is rejected or not confirmed.
+
 dynamicCircuitCurrentPX -> All phases must be set within 500ms (script) otherwise the phase will be set to 0.    
 
 Session polling can run automatically at a recommended interval of seven minutes per detected charger, or use a manually selected interval per charger. The Admin configuration shows the detected charger count, recommendation, and effective interval. Manual values below the recommendation are raised automatically to preserve the API rate limit. The last session request time is retained across adapter restarts.
@@ -45,6 +47,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
+
 ### 3.1.0 (2026-11-01)
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
 - (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.

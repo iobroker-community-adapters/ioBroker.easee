@@ -30,7 +30,7 @@ interface Site {
   costPerKWh?: number;
   costPerKwhExcludeVat?: number;
   vat?: number;
-  circuits?: Array<{ id: string }>;
+  circuits?: Array<{ id: string; chargers?: Charger[] | null }>;
 }
 
 interface ChargerConfig {
@@ -195,6 +195,9 @@ class Easee extends Adapter {
   observationVersions = new Map<string, ObservationVersion>();
   observedStateWrites = new Map<string, Promise<unknown>>();
   chargerIds: string[] = [];
+  chargerNameQueue: Promise<void> = Promise.resolve();
+  chargerNameVersions = new Map<string, number>();
+  chargerNamePending = new Map<string, number>();
   signalRSubscriptionPromises = new Map<string, Promise<void>>();
   unloading = false;
   apiRetryState = new Map<string, RetryState>();
@@ -798,6 +801,7 @@ class Easee extends Adapter {
     this.log.debug("read new states from the API");
 
     //Lesen alle Charger aus
+    const nameVersions = new Map(this.chargerNameVersions);
     const tmpAllChargers = await this.getAllCharger();
     if (this.unloading) {
       return;
@@ -846,6 +850,7 @@ class Easee extends Adapter {
             charger,
             tmpChargerState.state,
             tmpChargerState.timestamps,
+            nameVersions.get(charger.id) ?? 0,
           );
 
           //Setzen die Config zum Charger
@@ -1083,6 +1088,12 @@ class Easee extends Adapter {
       // The state was changed
       this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
       const tmpControl = id.split(".");
+      if (tmpControl.length === 4 && tmpControl[3] === "name") {
+        if (!state.ack) {
+          this.queueChargerNameChange(tmpControl[2], state.val);
+        }
+        return;
+      }
       if (tmpControl[3] == "config") {
         // change config, wenn ack = false
         if (!state.ack) {
@@ -1279,8 +1290,14 @@ class Easee extends Adapter {
     charger: Charger,
     charger_states: ChargerObservationState,
     timestamps: Partial<Record<string, number>> = {},
+    nameVersion = this.chargerNameVersions.get(charger.id) ?? 0,
   ): Promise<void> {
-    await this.setStateAsync(`${charger.id}.name`, charger.name, true);
+    if (
+      !this.chargerNamePending.has(charger.id) &&
+      nameVersion === (this.chargerNameVersions.get(charger.id) ?? 0)
+    ) {
+      await this.setStateAsync(`${charger.id}.name`, charger.name, true);
+    }
     const statusFields: (keyof ChargerObservationState)[] = [
       "cableLocked",
       "chargerOpMode",
@@ -1585,6 +1602,104 @@ class Easee extends Adapter {
         this.log.error(error);
         return undefined;
       });
+  }
+
+  queueChargerNameChange(chargerId: string, value: ioBroker.StateValue): void {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      this.log.error(
+        `Invalid charger name for ${chargerId}: expected a non-empty string`,
+      );
+      return;
+    }
+    const version = (this.chargerNameVersions.get(chargerId) ?? 0) + 1;
+    this.chargerNameVersions.set(chargerId, version);
+    this.chargerNamePending.set(
+      chargerId,
+      (this.chargerNamePending.get(chargerId) ?? 0) + 1,
+    );
+    this.chargerNameQueue = this.chargerNameQueue.then(async () => {
+      try {
+        if (!this.unloading) {
+          await this.changeChargerName(chargerId, value, version);
+        }
+      } catch (error) {
+        this.log.error(
+          `Charger name update failed for ${chargerId}: ${errorMessage(error)}`,
+        );
+      } finally {
+        const remaining = (this.chargerNamePending.get(chargerId) ?? 1) - 1;
+        if (remaining > 0) {
+          this.chargerNamePending.set(chargerId, remaining);
+        } else {
+          this.chargerNamePending.delete(chargerId);
+          this.chargerNameVersions.set(
+            chargerId,
+            (this.chargerNameVersions.get(chargerId) ?? 0) + 1,
+          );
+        }
+      }
+    });
+  }
+
+  async changeChargerName(
+    chargerId: string,
+    name: string,
+    version: number,
+  ): Promise<void> {
+    const site = await this.getChargerSite(chargerId);
+    const circuits = (site.circuits ?? []).filter(
+      (circuit) =>
+        Array.isArray(circuit.chargers) &&
+        circuit.chargers.some((charger) => charger.id === chargerId),
+    );
+    if (site.id == null || circuits.length !== 1 || circuits[0].id == null) {
+      throw new Error("Could not uniquely identify the charger circuit");
+    }
+    const circuit = circuits[0];
+    const ids = circuit.chargers!.map((charger) => charger.id);
+    if (
+      ids.some((id) => typeof id !== "string" || !id) ||
+      new Set(ids).size !== ids.length
+    ) {
+      throw new Error("Invalid charger list for circuit");
+    }
+    const readCharger = async (id: string): Promise<Charger> => {
+      const response = await axios.get<Charger>(
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          timeout: apiRequestTimeout,
+        },
+      );
+      if (!response.data || response.data.id !== id) {
+        throw new Error(`Invalid charger details for ${id}`);
+      }
+      return response.data;
+    };
+    const chargers: Charger[] = [];
+    for (const id of ids) {
+      const charger = await readCharger(id);
+      chargers.push(id === chargerId ? { ...charger, name } : charger);
+    }
+    await axios.put(
+      `${apiUrl}/api/sites/${encodeURIComponent(String(site.id))}/circuits/${encodeURIComponent(String(circuit.id))}/chargers`,
+      chargers,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: apiRequestTimeout,
+      },
+    );
+    const updated = await readCharger(chargerId);
+    if (updated.name !== name) {
+      throw new Error("Easee did not confirm the requested charger name");
+    }
+    if (
+      !this.unloading &&
+      this.chargerNameVersions.get(chargerId) === version
+    ) {
+      await this.setStateAsync(`${chargerId}.name`, updated.name, true);
+      this.log.info(`Charger name updated for ${chargerId}`);
+    }
   }
 
   // Lese den Charger aus
@@ -1967,12 +2082,16 @@ class Easee extends Adapter {
       common: {
         name: "name",
         type: "string",
-        role: "info.name",
+        role: "text",
         read: true,
-        write: false,
+        write: true,
       },
       native: {},
     });
+    await this.extendObjectAsync(`${charger.id}.name`, {
+      common: { role: "text", write: true },
+    });
+    this.subscribeStates(`${charger.id}.name`);
 
     //"cableLocked": true,
     await this.setObjectNotExistsAsync(`${charger.id}.status.cableLocked`, {

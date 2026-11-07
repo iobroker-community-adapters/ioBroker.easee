@@ -66,6 +66,9 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
   adapter.observationVersions = new Map();
   adapter.observedStateWrites = new Map();
   adapter.chargerIds = [];
+  adapter.chargerNameQueue = Promise.resolve();
+  adapter.chargerNameVersions = new Map();
+  adapter.chargerNamePending = new Map();
   adapter.signalRSubscriptionPromises = new Map();
   adapter.sessionChargers = [];
   adapter.sessionCursor = 0;
@@ -99,6 +102,233 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
   );
   return adapter;
 }
+
+describe("Charger name updates", () => {
+  afterEach(() => sinon.restore());
+
+  const stateId = "easee.0.charger-b.name";
+  const chargerA = {
+    id: "charger-a",
+    name: "First",
+    position: 1,
+    enabled: true,
+  };
+  const chargerB = {
+    id: "charger-b",
+    name: "Old",
+    position: 2,
+    enabled: false,
+  };
+  const site = {
+    id: "site-1",
+    circuits: [
+      { id: "wrong-circuit", chargers: [{ id: "other" }] },
+      {
+        id: "right-circuit",
+        chargers: [
+          { id: "charger-a", siteOnly: true },
+          { id: "charger-b", siteOnly: true },
+        ],
+      },
+    ],
+  };
+  const flush = (): Promise<void> =>
+    new Promise<void>((resolve) => setImmediate(resolve));
+
+  function setup(): {
+    adapter: ReturnType<typeof createAdapter>;
+    get: sinon.SinonStub;
+  } {
+    const adapter = createAdapterHarness();
+    adapter.getChargerSite.resolves(structuredClone(site));
+    const get = sinon.stub(axios, "get");
+    get
+      .withArgs("https://api.easee.com/api/chargers/charger-a")
+      .resolves({ data: { ...chargerA } });
+    get
+      .withArgs("https://api.easee.com/api/chargers/charger-b")
+      .resolves({ data: { ...chargerB } });
+    return { adapter, get };
+  }
+
+  it("updates the matching circuit with all charger details and confirms the reread name", async () => {
+    const { adapter, get } = setup();
+    let resolvePut!: (response: { data: object }) => void;
+    const put = sinon.stub(axios, "put").returns(
+      new Promise((resolve) => {
+        resolvePut = resolve;
+      }),
+    );
+    get
+      .withArgs("https://api.easee.com/api/chargers/charger-b")
+      .onSecondCall()
+      .resolves({ data: { ...chargerB, name: "New" } });
+
+    adapter.onStateChange(stateId, { val: "New", ack: false });
+    await flush();
+    expect(adapter.getChargerSite.calledOnceWithExactly("charger-b")).to.equal(
+      true,
+    );
+    expect(get.callCount).to.equal(2);
+    expect(put.calledOnce).to.equal(true);
+    expect(put.firstCall.args[0]).to.equal(
+      "https://api.easee.com/api/sites/site-1/circuits/right-circuit/chargers",
+    );
+    expect(put.firstCall.args[1]).to.deep.equal([
+      chargerA,
+      { ...chargerB, name: "New" },
+    ]);
+    expect(adapter.setStateAsync.called).to.equal(false);
+    resolvePut({ data: {} });
+    await flush();
+    expect(get.callCount).to.equal(3);
+    expect(get.lastCall.args[0]).to.equal(
+      "https://api.easee.com/api/chargers/charger-b",
+    );
+    expect(
+      adapter.setStateAsync.calledOnceWithExactly(
+        "charger-b.name",
+        "New",
+        true,
+      ),
+    ).to.equal(true);
+  });
+
+  it("does not acknowledge when the reread name differs from the requested name", async () => {
+    const { adapter, get } = setup();
+    sinon.stub(axios, "put").resolves({ data: {} });
+    get
+      .withArgs("https://api.easee.com/api/chargers/charger-b")
+      .onSecondCall()
+      .resolves({ data: { ...chargerB, name: "Canonical" } });
+    adapter.onStateChange(stateId, { val: "New", ack: false });
+    await flush();
+    expect(adapter.setStateAsync.called).to.equal(false);
+  });
+
+  for (const failure of ["site", "charger", "put", "confirmation"]) {
+    it(`does not acknowledge a failed ${failure} request`, async () => {
+      const { adapter, get } = setup();
+      const put = sinon.stub(axios, "put").resolves({ data: {} });
+      if (failure === "site") {
+        adapter.getChargerSite.rejects(new Error("site failed"));
+      }
+      if (failure === "charger") {
+        get
+          .withArgs("https://api.easee.com/api/chargers/charger-a")
+          .rejects(new Error("charger failed"));
+      }
+      if (failure === "put") {
+        put.rejects(new Error("put failed"));
+      }
+      if (failure === "confirmation") {
+        get
+          .withArgs("https://api.easee.com/api/chargers/charger-b")
+          .onSecondCall()
+          .rejects(new Error("confirmation failed"));
+      }
+      adapter.onStateChange(stateId, { val: "New", ack: false });
+      await flush();
+      expect(adapter.setStateAsync.called).to.equal(false);
+      if (failure === "site" || failure === "charger") {
+        expect(put.called).to.equal(false);
+      }
+    });
+  }
+
+  for (const value of [null, 123, true]) {
+    it(`rejects non-string name ${String(value)}`, async () => {
+      const { adapter, get } = setup();
+      const put = sinon.stub(axios, "put").resolves({ data: {} });
+      adapter.onStateChange(stateId, { val: value, ack: false });
+      await flush();
+      expect(adapter.getChargerSite.called).to.equal(false);
+      expect(get.called || put.called || adapter.setStateAsync.called).to.equal(
+        false,
+      );
+    });
+  }
+
+  it("serializes consecutive name changes and only acknowledges the latest", async () => {
+    const { adapter, get } = setup();
+    let release!: (value: object) => void;
+    const put = sinon.stub(axios, "put");
+    put.onFirstCall().returns(new Promise((resolve) => (release = resolve)));
+    put.onSecondCall().resolves({});
+    const chargerGet = get.withArgs(
+      "https://api.easee.com/api/chargers/charger-b",
+    );
+    chargerGet.onSecondCall().resolves({ data: { ...chargerB, name: "One" } });
+    chargerGet.onThirdCall().resolves({ data: { ...chargerB, name: "One" } });
+    chargerGet.onCall(3).resolves({ data: { ...chargerB, name: "Two" } });
+    adapter.onStateChange(stateId, { val: "One", ack: false });
+    await flush();
+    adapter.onStateChange(stateId, { val: "Two", ack: false });
+    await flush();
+    expect(put.callCount).to.equal(1);
+    release({});
+    await adapter.chargerNameQueue;
+    expect(put.callCount).to.equal(2);
+    expect(
+      adapter.setStateAsync.calledOnceWithExactly(
+        "charger-b.name",
+        "Two",
+        true,
+      ),
+    ).to.equal(true);
+  });
+
+  it("does not overwrite a name with a stale poll during or after an update", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setObservedState = sinon.stub().resolves();
+    adapter.chargerNameVersions.set("charger-b", 1);
+    adapter.chargerNamePending.set("charger-b", 1);
+    await adapter.setNewStatusToCharger(chargerB, {}, {}, 1);
+    adapter.chargerNamePending.delete("charger-b");
+    adapter.chargerNameVersions.set("charger-b", 2);
+    await adapter.setNewStatusToCharger(chargerB, {}, {}, 1);
+    expect(adapter.setStateAsync.called).to.equal(false);
+    await adapter.setNewStatusToCharger(chargerB, {}, {}, 2);
+    expect(
+      adapter.setStateAsync.calledOnceWithExactly(
+        "charger-b.name",
+        "Old",
+        true,
+      ),
+    ).to.equal(true);
+  });
+
+  it("ignores acknowledged name updates", async () => {
+    const { adapter, get } = setup();
+    const put = sinon.stub(axios, "put").resolves({ data: {} });
+    adapter.onStateChange(stateId, { val: "New", ack: true });
+    await flush();
+    expect(
+      adapter.getChargerSite.called ||
+        get.called ||
+        put.called ||
+        adapter.setStateAsync.called,
+    ).to.equal(false);
+  });
+
+  for (const circuits of [
+    undefined,
+    [],
+    [{ id: "other", chargers: [{ id: "charger-a" }] }],
+    [{ id: "missing-chargers" }],
+  ]) {
+    it(`safely rejects an unmapped charger: ${JSON.stringify(circuits)}`, async () => {
+      const { adapter, get } = setup();
+      adapter.getChargerSite.resolves({ id: "site-1", circuits });
+      const put = sinon.stub(axios, "put").resolves({ data: {} });
+      adapter.onStateChange(stateId, { val: "New", ack: false });
+      await flush();
+      expect(get.called || put.called || adapter.setStateAsync.called).to.equal(
+        false,
+      );
+    });
+  }
+});
 
 describe("Easee polling regressions", () => {
   afterEach(() => sinon.restore());
