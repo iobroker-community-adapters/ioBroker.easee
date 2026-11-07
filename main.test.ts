@@ -65,6 +65,11 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
   adapter.signalRSubscribedChargers = new Set();
   adapter.observationVersions = new Map();
   adapter.observedStateWrites = new Map();
+  adapter.lastChargerOpModes = new Map();
+  adapter.chargerSessionStarts = new Map();
+  adapter.chargerSessionGenerations = new Map();
+  adapter.chargerSessionAuthTokenResolved = new Set();
+  adapter.pendingSessionAuthTokenLookups = new Map();
   adapter.chargerIds = [];
   adapter.chargerNameQueue = Promise.resolve();
   adapter.chargerNameVersions = new Map();
@@ -866,6 +871,200 @@ describe("Easee polling regressions", () => {
     expect(
       adapter.setStateAsync.calledWith("charger.status.cableLocked"),
     ).to.equal(false);
+  });
+
+  it("creates and clears a read-only authorization token state", async () => {
+    const adapter = createAdapterHarness();
+    const setObjectNotExistsAsync = sinon.stub().resolves();
+    adapter.setObjectNotExistsAsync = setObjectNotExistsAsync;
+    adapter.extendObjectAsync = sinon.stub().resolves();
+    adapter.subscribeStates = sinon.stub();
+
+    await adapter.setAllStatusObjects({ id: "charger", name: "Charger" });
+
+    expect(
+      setObjectNotExistsAsync.calledWith(
+        "charger.status.authToken",
+        sinon.match({
+          common: sinon.match({
+            type: "string",
+            role: "text",
+            read: true,
+            write: false,
+          }),
+        }),
+      ),
+    ).to.equal(true);
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger.status.authToken",
+        "",
+        true,
+      ),
+    ).to.equal(true);
+  });
+
+  it("clears the previous authorization token once when charging starts", async () => {
+    const adapter = createAdapterHarness();
+    adapter.lastChargerOpModes.set("charger", 1);
+    adapter.chargerSessionAuthTokenResolved.add("charger");
+    adapter.updateCurrentSessionAuthToken = sinon.stub().resolves();
+
+    await adapter.writeObservedState(
+      "charger.status.chargerOpMode",
+      3,
+      100,
+      "SignalR",
+    );
+    await adapter.writeObservedState(
+      "charger.status.chargerOpMode",
+      3,
+      200,
+      "SignalR",
+    );
+
+    expect(
+      adapter.setStateAsync.args.filter(
+        (args: unknown[]) => args[0] === "charger.status.authToken",
+      ),
+    ).to.deep.equal([["charger.status.authToken", "", true]]);
+    expect(adapter.updateCurrentSessionAuthToken.called).to.equal(false);
+    expect(adapter.chargerSessionAuthTokenResolved.has("charger")).to.equal(
+      false,
+    );
+  });
+
+  it("requests a completed session token when charging is manually stopped", async () => {
+    const adapter = createAdapterHarness();
+    adapter.lastChargerOpModes.set("charger", 3);
+    adapter.chargerSessionStarts.set("charger", {
+      timestamp: 100,
+      reliable: true,
+    });
+    adapter.chargerSessionGenerations.set("charger", 1);
+    adapter.updateCurrentSessionAuthToken = sinon.stub().resolves();
+
+    await adapter.writeObservedState(
+      "charger.status.chargerOpMode",
+      4,
+      200,
+      "SignalR",
+    );
+
+    expect(adapter.updateCurrentSessionAuthToken.calledOnce).to.equal(true);
+    expect(adapter.updateCurrentSessionAuthToken.firstCall.args).to.deep.equal([
+      "charger",
+      100,
+      1,
+    ]);
+  });
+
+  it("retries the completed session lookup after car disconnection", async () => {
+    const adapter = createAdapterHarness();
+    adapter.lastChargerOpModes.set("charger", 4);
+    adapter.chargerSessionStarts.set("charger", {
+      timestamp: 100,
+      reliable: true,
+    });
+    adapter.chargerSessionGenerations.set("charger", 1);
+    adapter.updateCurrentSessionAuthToken = sinon.stub().resolves();
+
+    await adapter.writeObservedState(
+      "charger.status.chargerOpMode",
+      1,
+      300,
+      "SignalR",
+    );
+
+    expect(adapter.updateCurrentSessionAuthToken.calledOnce).to.equal(true);
+    expect(adapter.updateCurrentSessionAuthToken.firstCall.args).to.deep.equal([
+      "charger",
+      100,
+      1,
+    ]);
+    expect(adapter.chargerSessionStarts.has("charger")).to.equal(false);
+  });
+
+  it("reads the completed session token without selecting an old or active session", async () => {
+    const adapter = createAdapterHarness();
+    const sessionStartAt = Date.parse("2026-11-07T12:15:00.000Z");
+    adapter.chargerSessionGenerations.set("charger", 1);
+    const get = sinon.stub(axios, "get").resolves({
+      data: [
+        {
+          isComplete: true,
+          authToken: "old-token",
+          carConnected: "2026-11-07T11:00:00.000Z",
+        },
+        {
+          isComplete: false,
+          authToken: "active-token",
+          carConnected: "2026-11-07T12:20:00.000Z",
+        },
+        {
+          isComplete: true,
+          authToken: "completed-token",
+          carConnected: "2026-11-07T12:20:00.000Z",
+        },
+      ],
+    });
+
+    await adapter.updateCurrentSessionAuthToken("charger", sessionStartAt, 1);
+
+    expect(get.calledOnce).to.equal(true);
+    expect(get.firstCall.args[0]).to.match(
+      /^https:\/\/api\.easee\.com\/api\/sessions\/charger\/charger\/sessions\//,
+    );
+    expect(decodeURIComponent(get.firstCall.args[0])).to.include(
+      new Date(sessionStartAt - 5 * 60 * 1000).toISOString(),
+    );
+    expect(adapter.setStateAsync.args).to.deep.equal([
+      ["charger.status.authToken", "completed-token", true],
+    ]);
+    expect(adapter.chargerSessionAuthTokenResolved.has("charger")).to.equal(
+      true,
+    );
+    expect(adapter.log.debug.args.flat().join(" ")).not.to.include(
+      "completed-token",
+    );
+    expect(adapter.log.warn.args.flat().join(" ")).not.to.include(
+      "completed-token",
+    );
+  });
+
+  it("skips a completed token queued before a newer charging session starts", async () => {
+    const adapter = createAdapterHarness();
+    adapter.chargerSessionGenerations.set("charger", 1);
+    let releasePreviousWrite!: () => void;
+    const previousWrite = new Promise<void>((resolve) => {
+      releasePreviousWrite = resolve;
+    });
+    const stateId = "charger.status.authToken";
+    adapter.observedStateWrites.set(stateId, previousWrite);
+    sinon.stub(axios, "get").resolves({
+      data: [
+        {
+          isComplete: true,
+          authToken: "completed-token",
+          carConnected: "2026-11-07T12:20:00.000Z",
+        },
+      ],
+    });
+
+    const lookup = adapter.updateCurrentSessionAuthToken(
+      "charger",
+      undefined,
+      1,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    adapter.chargerSessionGenerations.set("charger", 2);
+    releasePreviousWrite();
+    await lookup;
+
+    expect(adapter.setStateAsync.called).to.equal(false);
+    expect(adapter.chargerSessionAuthTokenResolved.has("charger")).to.equal(
+      false,
+    );
   });
 
   it("resubscribes all known chargers after SignalR reconnects", () => {
