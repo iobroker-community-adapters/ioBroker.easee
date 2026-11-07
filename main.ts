@@ -1482,17 +1482,23 @@ class Easee extends Adapter {
         this.log.debug(
           `${source} observation value written to ${stateId}: ${JSON.stringify(value)}`,
         );
+        if (chargingStartCharger) {
+          await this.writeSessionAuthTokenIfCurrent(
+            chargingStartCharger.chargerId,
+            "",
+            chargingStartCharger.generation,
+          );
+          await this.writeSessionAuthTokenIfCurrent(
+            chargingStartCharger.chargerId,
+            "",
+            chargingStartCharger.generation,
+            "authTokenName",
+          );
+        }
       });
     this.observedStateWrites.set(stateId, write);
     try {
       await write;
-      if (chargingStartCharger) {
-        await this.writeSessionAuthTokenIfCurrent(
-          chargingStartCharger.chargerId,
-          "",
-          chargingStartCharger.generation,
-        );
-      }
       if (completedSessionLookup) {
         this.queueCompletedSessionAuthTokenLookup(completedSessionLookup);
       }
@@ -1857,8 +1863,9 @@ class Easee extends Adapter {
     chargerId: string,
     authToken: string,
     generation: number,
+    field: "authToken" | "authTokenName" = "authToken",
   ): Promise<void> {
-    const stateId = `${chargerId}.status.authToken`;
+    const stateId = `${chargerId}.status.${field}`;
     const previous = this.observedStateWrites.get(stateId);
     const write = (previous ?? Promise.resolve())
       .catch(() => undefined)
@@ -1986,6 +1993,38 @@ class Easee extends Adapter {
       this.chargerSessionAuthTokenResolved.add(chargerId);
       this.log.debug(
         `Received an authorization token for the completed charging session of ${chargerId}`,
+      );
+
+      let name = "unknown";
+      try {
+        const keys = await this.requestWithBackoff("account easee keys", () =>
+          axios.get<{ id?: string | null; owner?: string | null }[]>(
+            `${apiUrl}/api/accounts/easeekeys`,
+            {
+              headers: { Authorization: `Bearer ${accessToken}` },
+              timeout: apiRequestTimeout,
+            },
+          ),
+        );
+        if (Array.isArray(keys.data)) {
+          const match = keys.data.find(
+            (key) =>
+              typeof key?.id === "string" &&
+              key.id.trim().toUpperCase() ===
+                completedSession.authToken!.trim().toUpperCase(),
+          );
+          if (typeof match?.owner === "string" && match.owner.trim()) {
+            name = match.owner.trim();
+          }
+        }
+      } catch {
+        this.log.debug("Could not resolve authorization token name");
+      }
+      await this.writeSessionAuthTokenIfCurrent(
+        chargerId,
+        name,
+        generation,
+        "authTokenName",
       );
     } catch (error) {
       if (!this.unloading && !isRetryableError(error)) {
@@ -2359,6 +2398,18 @@ class Easee extends Adapter {
       native: {},
     });
     await this.setStateAsync(`${charger.id}.status.authToken`, "", true);
+    await this.setObjectNotExistsAsync(`${charger.id}.status.authTokenName`, {
+      type: "state",
+      common: {
+        name: "Owner name of the charging session authorization token",
+        type: "string",
+        role: "text",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+    await this.setStateAsync(`${charger.id}.status.authTokenName`, "", true);
 
     //"totalPower": 0,
     await this.setObjectNotExistsAsync(`${charger.id}.status.totalPower`, {

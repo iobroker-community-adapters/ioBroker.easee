@@ -902,6 +902,21 @@ describe("Easee polling regressions", () => {
         true,
       ),
     ).to.equal(true);
+    expect(
+      setObjectNotExistsAsync.calledWith(
+        "charger.status.authTokenName",
+        sinon.match({
+          common: sinon.match({ type: "string", read: true, write: false }),
+        }),
+      ),
+    ).to.equal(true);
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger.status.authTokenName",
+        "",
+        true,
+      ),
+    ).to.equal(true);
   });
 
   it("clears the previous authorization token once when charging starts", async () => {
@@ -928,6 +943,13 @@ describe("Easee polling regressions", () => {
         (args: unknown[]) => args[0] === "charger.status.authToken",
       ),
     ).to.deep.equal([["charger.status.authToken", "", true]]);
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger.status.authTokenName",
+        "",
+        true,
+      ),
+    ).to.equal(true);
     expect(adapter.updateCurrentSessionAuthToken.called).to.equal(false);
     expect(adapter.chargerSessionAuthTokenResolved.has("charger")).to.equal(
       false,
@@ -989,7 +1011,8 @@ describe("Easee polling regressions", () => {
     const adapter = createAdapterHarness();
     const sessionStartAt = Date.parse("2026-11-07T12:15:00.000Z");
     adapter.chargerSessionGenerations.set("charger", 1);
-    const get = sinon.stub(axios, "get").resolves({
+    const get = sinon.stub(axios, "get");
+    get.onFirstCall().resolves({
       data: [
         {
           isComplete: true,
@@ -1009,9 +1032,15 @@ describe("Easee polling regressions", () => {
       ],
     });
 
+    get
+      .onSecondCall()
+      .resolves({ data: [{ id: "COMPLETED-TOKEN", owner: "Alice" }] });
     await adapter.updateCurrentSessionAuthToken("charger", sessionStartAt, 1);
 
-    expect(get.calledOnce).to.equal(true);
+    expect(get.calledTwice).to.equal(true);
+    expect(get.secondCall.args[0]).to.equal(
+      "https://api.easee.com/api/accounts/easeekeys",
+    );
     expect(get.firstCall.args[0]).to.match(
       /^https:\/\/api\.easee\.com\/api\/sessions\/charger\/charger\/sessions\//,
     );
@@ -1020,6 +1049,7 @@ describe("Easee polling regressions", () => {
     );
     expect(adapter.setStateAsync.args).to.deep.equal([
       ["charger.status.authToken", "completed-token", true],
+      ["charger.status.authTokenName", "Alice", true],
     ]);
     expect(adapter.chargerSessionAuthTokenResolved.has("charger")).to.equal(
       true,
@@ -1030,6 +1060,69 @@ describe("Easee polling regressions", () => {
     expect(adapter.log.warn.args.flat().join(" ")).not.to.include(
       "completed-token",
     );
+  });
+
+  for (const outcome of ["missing", "empty", "error"]) {
+    it(`shows unknown when the authorization token name is ${outcome}`, async () => {
+      const adapter = createAdapterHarness();
+      adapter.chargerSessionGenerations.set("charger", 1);
+      const get = sinon.stub(axios, "get");
+      get
+        .onFirstCall()
+        .resolves({ data: [{ isComplete: true, authToken: "token" }] });
+      if (outcome === "error") {
+        get.onSecondCall().rejects(new Error("unavailable"));
+      } else {
+        get.onSecondCall().resolves({
+          data:
+            outcome === "empty"
+              ? [{ id: "token", owner: " " }]
+              : [{ id: "other", owner: "Other" }],
+        });
+      }
+      await adapter.updateCurrentSessionAuthToken("charger", undefined, 1);
+      expect(
+        adapter.setStateAsync.calledWithExactly(
+          "charger.status.authToken",
+          "token",
+          true,
+        ),
+      ).to.equal(true);
+      expect(
+        adapter.setStateAsync.calledWithExactly(
+          "charger.status.authTokenName",
+          "unknown",
+          true,
+        ),
+      ).to.equal(true);
+    });
+  }
+
+  it("does not write an old token name after a new charging session starts", async () => {
+    const adapter = createAdapterHarness();
+    adapter.chargerSessionGenerations.set("charger", 1);
+    let releaseKeys!: (value: unknown) => void;
+    const get = sinon.stub(axios, "get");
+    get
+      .onFirstCall()
+      .resolves({ data: [{ isComplete: true, authToken: "token" }] });
+    get.onSecondCall().returns(
+      new Promise((resolve) => {
+        releaseKeys = resolve;
+      }),
+    );
+    const lookup = adapter.updateCurrentSessionAuthToken(
+      "charger",
+      undefined,
+      1,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    adapter.chargerSessionGenerations.set("charger", 2);
+    releaseKeys({ data: [{ id: "token", owner: "Alice" }] });
+    await lookup;
+    expect(
+      adapter.setStateAsync.calledWith("charger.status.authTokenName"),
+    ).to.equal(false);
   });
 
   it("skips a completed token queued before a newer charging session starts", async () => {
