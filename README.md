@@ -18,7 +18,7 @@ Adapter to connect Easee Wallbox
 
 ## Help
 
-`status.authToken` and `status.authTokenName` are cleared when charging starts (Easee Observation 109). The adapter checks for a completed session when the charger enters Completed mode or the car disconnects. Once Easee returns a token, it is stored in `status.authToken`; the adapter looks up the key owner in the logged-in account's Easee Keys and writes the name to `status.authTokenName`. The name is `unknown` if no matching name is available or the lookup fails. Both states remain empty until a token is available. Keys belonging to other accounts may not be resolvable.
+`status.authToken` and `status.authTokenName` are cleared when charging starts (Easee Observation 109). The API does not provide the token at session start. The adapter checks for a completed session when the charger enters Completed mode or the car disconnects. Once Easee returns a token, it is stored in `status.authToken`; the adapter looks up the key owner in the logged-in account's Easee Keys and writes the name to `status.authTokenName`. The name is `unknown` if no matching name is available or the lookup fails. Both states remain empty until a token is available. Keys belonging to other accounts may not be resolvable.
 
 `status.chargerOpMode` reports the charger's operation mode (Easee Observation 109):
 
@@ -52,7 +52,7 @@ This adapter would not have been possible without the great work of @Newan (http
 ### **WORK IN PROGRESS**
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
 - (Voodoo2man) Replaced the adapter icon.
-- (Voodoo2man) Clear the authorization token when charging starts and fetch it from the completed session after charging stops, with a separate owner-name state.
+- (Voodoo2man) Added an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.
 
 ### 3.1.0 (2026-11-01)
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
