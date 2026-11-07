@@ -1,4 +1,4 @@
-<img src="admin/Readme.png" alt="Logo" width="768">
+<img src="admin/Readme.png" alt="Logo" width="538">
 
 # ioBroker.easee
 
