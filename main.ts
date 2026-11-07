@@ -53,6 +53,12 @@ interface ChargerSession {
   totalCost: number;
 }
 
+interface ChargingSessionDetails {
+  carConnected?: string | null;
+  isComplete: boolean;
+  authToken?: string | null;
+}
+
 interface RetryState {
   delay: number;
   retryAt: number;
@@ -194,6 +200,7 @@ class Easee extends Adapter {
   signalRSubscribedChargers = new Set<string>();
   observationVersions = new Map<string, ObservationVersion>();
   observedStateWrites = new Map<string, Promise<unknown>>();
+  lastChargerOpModes = new Map<string, number>();
   chargerIds: string[] = [];
   chargerNameQueue: Promise<void> = Promise.resolve();
   chargerNameVersions = new Map<string, number>();
@@ -1396,6 +1403,29 @@ class Easee extends Adapter {
     }
 
     this.observationVersions.set(stateId, version);
+    let chargingStartChargerId: string | undefined;
+    const chargerOpModeSuffix = ".status.chargerOpMode";
+    if (
+      stateId.endsWith(chargerOpModeSuffix) &&
+      typeof value === "number" &&
+      Number.isFinite(value)
+    ) {
+      const chargerId = stateId
+        .slice(0, -chargerOpModeSuffix.length)
+        .split(".")
+        .pop();
+      if (chargerId) {
+        const previousOpMode = this.lastChargerOpModes.get(chargerId);
+        if (
+          value === 3 &&
+          previousOpMode !== undefined &&
+          previousOpMode !== 3
+        ) {
+          chargingStartChargerId = chargerId;
+        }
+        this.lastChargerOpModes.set(chargerId, value);
+      }
+    }
     this.log.debug(
       `${source} observation for ${stateId} accepted: ${JSON.stringify(value)} (timestamp=${version.timestamp ?? "missing"})`,
     );
@@ -1411,6 +1441,9 @@ class Easee extends Adapter {
     this.observedStateWrites.set(stateId, write);
     try {
       await write;
+      if (chargingStartChargerId) {
+        void this.updateCurrentSessionAuthToken(chargingStartChargerId);
+      }
     } catch (error) {
       if (this.observationVersions.get(stateId) === version) {
         if (previousVersion) {
@@ -1768,6 +1801,55 @@ class Easee extends Adapter {
     return response.data;
   }
 
+  async updateCurrentSessionAuthToken(chargerId: string): Promise<void> {
+    const stateId = `${chargerId}.status.authToken`;
+    try {
+      await this.setStateAsync(stateId, "", true);
+      if (this.unloading) {
+        return;
+      }
+
+      const to = new Date();
+      const from = new Date(to.getTime() - 60 * 60 * 1000);
+      const response = await this.requestWithBackoff(
+        `charger session auth ${chargerId}`,
+        () =>
+          axios.get<ChargingSessionDetails[]>(
+            `${apiUrl}/api/sessions/charger/${encodeURIComponent(chargerId)}/sessions/${encodeURIComponent(from.toISOString())}/${encodeURIComponent(to.toISOString())}`,
+            {
+              headers: { Authorization: `Bearer ${accessToken}` },
+              timeout: apiRequestTimeout,
+            },
+          ),
+      );
+      if (this.unloading || !Array.isArray(response.data)) {
+        return;
+      }
+
+      const activeSession = response.data
+        .filter(
+          (session) =>
+            session?.isComplete === false &&
+            typeof session.authToken === "string" &&
+            session.authToken.trim().length > 0,
+        )
+        .sort(
+          (first, second) =>
+            Date.parse(second.carConnected ?? "") -
+            Date.parse(first.carConnected ?? ""),
+        )[0];
+      if (activeSession?.authToken) {
+        await this.setStateAsync(stateId, activeSession.authToken, true);
+      }
+    } catch (error) {
+      if (!this.unloading && !isRetryableError(error)) {
+        this.log.warn(
+          `Could not read the charging authorization token for ${chargerId}: ${errorMessage(error)}`,
+        );
+      }
+    }
+  }
+
   async changeChargingPrice(
     charger_id: string,
     site: Site,
@@ -2118,6 +2200,19 @@ class Easee extends Adapter {
       },
       native: {},
     });
+
+    await this.setObjectNotExistsAsync(`${charger.id}.status.authToken`, {
+      type: "state",
+      common: {
+        name: "Authorization token used for the current charging session",
+        type: "string",
+        role: "text",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+    await this.setStateAsync(`${charger.id}.status.authToken`, "", true);
 
     //"totalPower": 0,
     await this.setObjectNotExistsAsync(`${charger.id}.status.totalPower`, {

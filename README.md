@@ -1,22 +1,24 @@
-![Logo](admin/easee.png)
+<img src="admin/Readme.png" alt="Logo" width="768">
+
 # ioBroker.easee
 
 [![NPM version](http://img.shields.io/npm/v/iobroker.easee.svg)](https://www.npmjs.com/package/iobroker.easee)
 [![Downloads](https://img.shields.io/npm/dm/iobroker.easee.svg)](https://www.npmjs.com/package/iobroker.easee)
 ![Number of Installations (latest)](http://iobroker.live/badges/easee-installed.svg)
-![Number of Installations (stable)](http://iobroker.live/badges/easee-stable.svg)
-[![Dependency Status](https://img.shields.io/david/Newan/iobroker.easee.svg)](https://david-dm.org/Newan/iobroker.easee)
-[![Known Vulnerabilities](https://snyk.io/test/github/Newan/ioBroker.easee/badge.svg)](https://snyk.io/test/github/Newan/ioBroker.easee)
+<!-- ![Number of Installations (stable)](http://iobroker.live/badges/easee-stable.svg) -->
+
 
 [![NPM](https://nodei.co/npm/iobroker.easee.png?downloads=true)](https://nodei.co/npm/iobroker.easee/)
 
-**Tests:** ![Test and Release](https://github.com/Newan/ioBroker.easee/workflows/Test%20and%20Release/badge.svg)
+
 
 ## easee adapter for ioBroker
 
 Adapter to connect Easee Wallbox
 
 ## Help
+
+`status.authToken` is read once when the charger enters the Charging operation mode (Easee Observation 109). The adapter requests the recent charging session and shows its authorization token when Easee provides one. The state is cleared at adapter startup and each detected charging start; it remains empty if no active session token is available.
 
 `status.chargerOpMode` reports the charger's operation mode (Easee Observation 109):
 
@@ -49,6 +51,7 @@ This adapter would not have been possible without the great work of @Newan (http
 -->
 ### **WORK IN PROGRESS**
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
+- (Voodoo2man) Replaced the adapter icon.
 
 ### 3.1.0 (2026-11-01)
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
