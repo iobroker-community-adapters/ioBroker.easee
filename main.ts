@@ -1416,11 +1416,7 @@ class Easee extends Adapter {
         .pop();
       if (chargerId) {
         const previousOpMode = this.lastChargerOpModes.get(chargerId);
-        if (
-          value === 3 &&
-          previousOpMode !== undefined &&
-          previousOpMode !== 3
-        ) {
+        if (value === 3 && previousOpMode !== 3) {
           chargingStartChargerId = chargerId;
         }
         this.lastChargerOpModes.set(chargerId, value);
@@ -1838,9 +1834,17 @@ class Easee extends Adapter {
             Date.parse(second.carConnected ?? "") -
             Date.parse(first.carConnected ?? ""),
         )[0];
-      if (activeSession?.authToken) {
-        await this.setStateAsync(stateId, activeSession.authToken, true);
+      if (!activeSession?.authToken) {
+        this.log.debug(
+          `No active charging session authorization token returned for ${chargerId}`,
+        );
+        return;
       }
+
+      this.log.debug(
+        `Received an authorization token for the current charging session of ${chargerId}`,
+      );
+      await this.setStateAsync(stateId, activeSession.authToken, true);
     } catch (error) {
       if (!this.unloading && !isRetryableError(error)) {
         this.log.warn(

@@ -18,7 +18,7 @@ Adapter to connect Easee Wallbox
 
 ## Help
 
-`status.authToken` is read once when the charger enters the Charging operation mode (Easee Observation 109). The adapter requests the recent charging session and shows its authorization token when Easee provides one. The state is cleared at adapter startup and each detected charging start; it remains empty if no active session token is available.
+`status.authToken` is read once when the Charging operation mode is first observed after startup or entered later (Easee Observation 109). The adapter requests the recent charging session and shows its authorization token when Easee provides one. The state is cleared at adapter startup and each detected charging start; it remains empty if no active session token is available.
 
 `status.chargerOpMode` reports the charger's operation mode (Easee Observation 109):
 

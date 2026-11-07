@@ -923,7 +923,7 @@ describe("Easee polling regressions", () => {
     ).to.equal(true);
   });
 
-  it("does not request a token for the first observed charging state", async () => {
+  it("requests a token once when the first observed state is already charging", async () => {
     const adapter = createAdapterHarness();
     adapter.updateCurrentSessionAuthToken = sinon.stub().resolves();
 
@@ -933,8 +933,16 @@ describe("Easee polling regressions", () => {
       100,
       "REST",
     );
+    await adapter.writeObservedState(
+      "charger.status.chargerOpMode",
+      3,
+      200,
+      "REST",
+    );
 
-    expect(adapter.updateCurrentSessionAuthToken.called).to.equal(false);
+    expect(
+      adapter.updateCurrentSessionAuthToken.calledOnceWithExactly("charger"),
+    ).to.equal(true);
   });
 
   it("reads the active session token and does not log its value", async () => {
