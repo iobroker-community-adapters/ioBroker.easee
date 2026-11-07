@@ -887,6 +887,7 @@ describe("Easee polling regressions", () => {
         "charger.status.authToken",
         sinon.match({
           common: sinon.match({
+            name: "Authorization token used for the last completed charging session",
             type: "string",
             role: "text",
             read: true,
@@ -894,6 +895,13 @@ describe("Easee polling regressions", () => {
           }),
         }),
       ),
+    ).to.equal(true);
+    expect(
+      adapter.extendObjectAsync.calledWithExactly("charger.status.authToken", {
+        common: {
+          name: "Authorization token used for the last completed charging session",
+        },
+      }),
     ).to.equal(true);
     expect(
       adapter.setStateAsync.calledWithExactly(

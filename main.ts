@@ -2386,10 +2386,13 @@ class Easee extends Adapter {
       native: {},
     });
 
-    await this.setObjectNotExistsAsync(`${charger.id}.status.authToken`, {
+    const authTokenId = `${charger.id}.status.authToken`;
+    const authTokenName =
+      "Authorization token used for the last completed charging session";
+    await this.setObjectNotExistsAsync(authTokenId, {
       type: "state",
       common: {
-        name: "Authorization token used for the current charging session",
+        name: authTokenName,
         type: "string",
         role: "text",
         read: true,
@@ -2397,7 +2400,10 @@ class Easee extends Adapter {
       },
       native: {},
     });
-    await this.setStateAsync(`${charger.id}.status.authToken`, "", true);
+    await this.extendObjectAsync(authTokenId, {
+      common: { name: authTokenName },
+    });
+    await this.setStateAsync(authTokenId, "", true);
     await this.setObjectNotExistsAsync(`${charger.id}.status.authTokenName`, {
       type: "state",
       common: {
