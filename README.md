@@ -18,6 +18,10 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 ## Help
 
+The adapter can use either the existing Easee Cloud connection or a local
+Bluetooth connection. See the [Bluetooth setup, datapoint mapping, and
+limitations](./docs/bluetooth.md) before enabling Bluetooth mode.
+
 `status.authToken` and `status.authTokenName` are cleared when charging starts (Easee Observation 109). The API does not provide the token at session start. The adapter checks for a completed session when the charger enters Completed mode or the car disconnects. Once Easee returns a token, it is stored in `status.authToken`; the adapter looks up the key owner in the logged-in account's Easee Keys and writes the name to `status.authTokenName`. The name is `unknown` if no matching name is available or the lookup fails. Both states remain empty until a token is available. Keys belonging to other accounts may not be resolvable.
 
 `status.chargerOpMode` reports the charger's operation mode (Easee Observation 109):
@@ -36,7 +40,10 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 The `<chargerId>.name` state can be written to change the charger name in Easee. The adapter reads the charger's circuit and submits its complete charger list to Easee, then confirms the state only when the name is returned by the API. The Easee account must have permission to update chargers on the site. Since Easee does not document all update semantics, test this feature on a test site first and check the adapter log if the update is rejected or not confirmed.
 
-dynamicCircuitCurrentPX -> All phases must be set within 500ms (script) otherwise the phase will be set to 0.    
+In Cloud mode, all `dynamicCircuitCurrentPX` phases must be set within 500 ms
+otherwise an unset phase is sent as 0. In Bluetooth mode, phase writes are
+batched for 500 ms and the adapter reads the other current phase values before
+sending all three; it refuses the write if those values are unavailable.
 
 Session polling can run automatically at a recommended interval of seven minutes per detected charger, or use a manually selected interval per charger. The Admin configuration shows the detected charger count, recommendation, and effective interval. Manual values below the recommendation are raised automatically to preserve the API rate limit. The last session request time is retained across adapter restarts.
 
@@ -49,6 +56,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- Added an optional local Bluetooth connection mode with configured chargers and PINs.
+
 ### 3.2.0 (2026-11-07)
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
 - (Voodoo2man) Replaced the adapter icon.

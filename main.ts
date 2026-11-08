@@ -10,6 +10,23 @@ import {
   normalizeBooleanObservation,
   observationsToChargerStateWithTimestamps,
 } from "./lib/observations.ts";
+import { BluetoothClient } from "./lib/bluetooth-client.ts";
+import type {
+  BluetoothClientOptions,
+  BluetoothDeviceConfig,
+  BluetoothStatusEvent,
+} from "./lib/bluetooth-client.ts";
+import type { BluetoothCommand } from "./lib/bluetooth-protocol.ts";
+import { createNobleBluetoothScanner } from "./lib/noble-bluetooth-transport.ts";
+import { mapBluetoothPoll } from "./lib/bluetooth-mapping.ts";
+import {
+  getConnectionMode,
+  parseBluetoothChargerSettings,
+} from "./lib/connection-mode.ts";
+import type {
+  BluetoothChargerConfig,
+  ConnectionMode,
+} from "./lib/connection-mode.ts";
 import type {
   ChargerObservationResult,
   ChargerObservationState,
@@ -93,6 +110,18 @@ interface DynamicCircuitState {
 
 interface PendingRetry {
   timer: Timer;
+}
+
+interface PendingBluetoothCircuitWrite {
+  values: Partial<Record<Phase, number>>;
+  stateIds: Partial<Record<Phase, string>>;
+  sequence: number;
+  timer: Timer;
+}
+
+interface BluetoothPauseRestore {
+  amperes: number;
+  generation: number;
 }
 
 interface ChargerValueSet {
@@ -232,6 +261,25 @@ class Easee extends Adapter {
   sessionRetryAt = 0;
   sessionPollMode: "auto" | "manual" = "auto";
   sessionManualInterval = defaultSessionPollInterval;
+  connectionMode: ConnectionMode = "cloud";
+  bluetoothClient: BluetoothClient | null = null;
+  bluetoothChargers: BluetoothChargerConfig[] = [];
+  bluetoothConnections = new Map<string, boolean>();
+  bluetoothConnectionErrors = new Map<string, string>();
+  bluetoothConnectionGenerations = new Map<string, number>();
+  bluetoothPauseRestore = new Map<string, BluetoothPauseRestore>();
+  bluetoothCircuitWrites = new Map<string, PendingBluetoothCircuitWrite>();
+  bluetoothCircuitWriteSequence = 0;
+  bluetoothDisconnectWaiters = new Map<
+    string,
+    Set<(disconnected: boolean) => void>
+  >();
+  bluetoothReconnectTimer: Timer | null = null;
+  bluetoothPollTimer: Timer | null = null;
+  bluetoothPollInFlight = false;
+  bluetoothReconnectInFlight = false;
+  bluetoothReconnectDelay = 10000;
+  bluetoothStartupComplete = false;
 
   constructor(options: AdapterOptions = { name: "easee" }) {
     super({
@@ -425,6 +473,12 @@ class Easee extends Adapter {
     //initial Status melden
     await this.setStateAsync("info.connection", false, true);
 
+    this.connectionMode = getConnectionMode(this.config.connectionMode);
+    if (this.connectionMode === "bluetooth") {
+      await this.startBluetooth();
+      return;
+    }
+
     this.configureSessionPolling();
     await this.setObjectNotExistsAsync("info.sessionPollLastRequest", {
       type: "state",
@@ -493,6 +547,810 @@ class Easee extends Adapter {
     }
   }
 
+  async startBluetooth(): Promise<void> {
+    try {
+      this.bluetoothChargers = parseBluetoothChargerSettings(this.config);
+    } catch (error) {
+      this.log.error(
+        `Invalid Bluetooth charger configuration: ${errorMessage(error)}`,
+      );
+      return;
+    }
+
+    const devices: BluetoothDeviceConfig[] = [];
+    for (const config of this.bluetoothChargers) {
+      const charger: Charger = {
+        id: config.serialNumber,
+        name: config.name,
+      };
+      devices.push({
+        serial: config.serialNumber,
+        pin: config.pin,
+        name: config.name,
+      });
+      this.bluetoothConnections.set(charger.id, false);
+      this.chargerIds.push(charger.id);
+      await this.setAllStatusObjects(charger);
+      await this.setAllConfigObjects(charger);
+      await this.setBluetoothInfoObjects(charger);
+      await this.setStateAsync(`${charger.id}.name`, charger.name, true);
+    }
+
+    try {
+      const scanner = await createNobleBluetoothScanner();
+      const options: BluetoothClientOptions = {
+        onStatus: (event) => this.handleBluetoothStatus(event),
+      };
+      this.bluetoothClient = new BluetoothClient(devices, scanner, options);
+      const configuredInterval = Number(this.config.polltime);
+      if (Number.isFinite(configuredInterval) && configuredInterval > 0) {
+        polltime = configuredInterval;
+      }
+      try {
+        await this.bluetoothClient.start();
+      } catch (error) {
+        this.log.error(
+          `Could not start Bluetooth client: ${errorMessage(error)}`,
+        );
+      } finally {
+        this.bluetoothStartupComplete = true;
+      }
+      this.scheduleBluetoothPoll(0);
+      this.scheduleBluetoothReconnect();
+    } catch (error) {
+      this.log.error(
+        `Could not initialize Bluetooth transport: ${errorMessage(error)}`,
+      );
+      for (const charger of this.bluetoothChargers) {
+        this.bluetoothConnectionErrors.set(
+          charger.serialNumber,
+          errorMessage(error),
+        );
+        await this.setStateAsync(
+          `${charger.serialNumber}.info.bluetoothError`,
+          errorMessage(error),
+          true,
+        );
+      }
+    }
+  }
+
+  async setBluetoothInfoObjects(charger: Charger): Promise<void> {
+    await this.setObjectNotExistsAsync(
+      `${charger.id}.info.bluetoothConnection`,
+      {
+        type: "state",
+        common: {
+          name: "Bluetooth connection",
+          type: "boolean",
+          role: "indicator.connected",
+          read: true,
+          write: false,
+          def: false,
+        },
+        native: {},
+      },
+    );
+    await this.setObjectNotExistsAsync(`${charger.id}.info.bluetoothError`, {
+      type: "state",
+      common: {
+        name: "Bluetooth connection error",
+        type: "string",
+        role: "text",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+    await this.setObjectNotExistsAsync(`${charger.id}.info.bluetoothRSSI`, {
+      type: "state",
+      common: {
+        name: "Bluetooth signal strength",
+        type: "number",
+        role: "value",
+        unit: "dBm",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+    await Promise.all([
+      this.setStateAsync(`${charger.id}.info.bluetoothConnection`, false, true),
+      this.setStateAsync(`${charger.id}.info.bluetoothError`, "", true),
+    ]);
+  }
+
+  handleBluetoothStatus(event: BluetoothStatusEvent): void {
+    const connected = event.status === "connected";
+    this.bluetoothConnections.set(event.serial, connected);
+    if (event.error) {
+      this.bluetoothConnectionErrors.set(event.serial, event.error.message);
+    } else if (connected) {
+      this.bluetoothConnectionErrors.delete(event.serial);
+      this.bluetoothPauseRestore.delete(event.serial);
+      this.bluetoothConnectionGenerations.set(
+        event.serial,
+        (this.bluetoothConnectionGenerations.get(event.serial) ?? 0) + 1,
+      );
+    } else if (
+      event.status === "disconnected" &&
+      !this.bluetoothConnectionErrors.has(event.serial)
+    ) {
+      this.bluetoothConnectionErrors.set(
+        event.serial,
+        "Not connected; check range, charger discoverability, PIN, and whether another Bluetooth client may be connected.",
+      );
+    }
+    if (event.status === "disconnected") {
+      for (const resolve of [
+        ...(this.bluetoothDisconnectWaiters.get(event.serial) ?? []),
+      ]) {
+        resolve(true);
+      }
+    }
+
+    const error = this.bluetoothConnectionErrors.get(event.serial) ?? "";
+    Promise.all([
+      this.setStateAsync(
+        `${event.serial}.info.bluetoothConnection`,
+        connected,
+        true,
+      ),
+      this.setStateAsync(`${event.serial}.info.bluetoothError`, error, true),
+      this.setStateAsync(
+        "info.connection",
+        [...this.bluetoothConnections.values()].some(Boolean),
+        true,
+      ),
+    ]).catch((writeError) => {
+      this.log.error(
+        `Could not update Bluetooth connection status for ${event.serial}: ${errorMessage(writeError)}`,
+      );
+    });
+
+    if (connected) {
+      this.scheduleBluetoothPoll(0);
+    } else if (event.status === "disconnected") {
+      this.cancelBluetoothCircuitWrites(event.serial);
+      if (this.bluetoothStartupComplete) {
+        this.scheduleBluetoothReconnect();
+      }
+    }
+  }
+
+  scheduleBluetoothReconnect(): void {
+    if (
+      this.unloading ||
+      !this.bluetoothStartupComplete ||
+      !this.bluetoothClient ||
+      this.bluetoothReconnectTimer ||
+      this.bluetoothReconnectInFlight ||
+      [...this.bluetoothConnections.values()].every(Boolean)
+    ) {
+      return;
+    }
+
+    const delay = this.bluetoothReconnectDelay;
+    this.bluetoothReconnectDelay = Math.min(delay * 2, 300000);
+    this.bluetoothReconnectTimer = this.setTimeout(() => {
+      this.bluetoothReconnectTimer = null;
+      const client = this.bluetoothClient;
+      if (!client || this.unloading) {
+        return;
+      }
+      this.bluetoothReconnectInFlight = true;
+      client
+        .reconnect()
+        .catch((error) => {
+          this.log.warn(
+            `Bluetooth reconnection failed: ${errorMessage(error)}`,
+          );
+        })
+        .finally(() => {
+          this.bluetoothReconnectInFlight = false;
+          if (
+            [...this.bluetoothConnections.values()].every(Boolean) &&
+            this.bluetoothConnections.size > 0
+          ) {
+            this.bluetoothReconnectDelay = 10000;
+          } else {
+            this.scheduleBluetoothReconnect();
+          }
+        });
+    }, delay);
+  }
+
+  scheduleBluetoothPoll(delay: number): void {
+    if (this.unloading || !this.bluetoothClient) {
+      return;
+    }
+    if (this.bluetoothPollTimer) {
+      this.clearTimeout(this.bluetoothPollTimer);
+    }
+    this.bluetoothPollTimer = this.setTimeout(() => {
+      this.bluetoothPollTimer = null;
+      void this.pollBluetoothChargers();
+    }, delay);
+  }
+
+  async pollBluetoothChargers(): Promise<void> {
+    if (this.unloading || !this.bluetoothClient || this.bluetoothPollInFlight) {
+      return;
+    }
+    this.bluetoothPollInFlight = true;
+    const client = this.bluetoothClient;
+    try {
+      for (const charger of this.bluetoothChargers) {
+        if (
+          this.unloading ||
+          !this.bluetoothConnections.get(charger.serialNumber)
+        ) {
+          continue;
+        }
+        try {
+          const result = await client.poll(charger.serialNumber);
+          await this.applyBluetoothPoll(charger.serialNumber, result);
+        } catch (error) {
+          this.log.warn(
+            `Bluetooth polling failed for ${charger.serialNumber}: ${errorMessage(error)}`,
+          );
+        }
+      }
+    } finally {
+      this.bluetoothPollInFlight = false;
+      if (!this.unloading) {
+        this.scheduleBluetoothPoll(polltime * 1000);
+      }
+    }
+  }
+
+  async applyBluetoothPoll(
+    serial: string,
+    result: Awaited<ReturnType<BluetoothClient["poll"]>>,
+  ): Promise<void> {
+    const mapped = mapBluetoothPoll(result);
+    for (const [stateId, value] of Object.entries(mapped)) {
+      if (this.unloading) {
+        return;
+      }
+      await this.setStateAsync(`${serial}.${stateId}`, value, true);
+    }
+  }
+
+  async readBluetoothPoll(
+    serial: string,
+  ): Promise<Awaited<ReturnType<BluetoothClient["poll"]>>> {
+    const client = this.bluetoothClient;
+    if (!client || !this.bluetoothConnections.get(serial)) {
+      throw new Error(`Bluetooth charger ${serial} is not connected`);
+    }
+    const result = await client.poll(serial);
+    await this.applyBluetoothPoll(serial, result);
+    return result;
+  }
+
+  async handleBluetoothStateChange(
+    id: string,
+    state: ioBroker.State,
+  ): Promise<void> {
+    if (this.unloading) {
+      return;
+    }
+    const parts = id.split(".");
+    const serial = parts[2];
+    if (!serial || !this.bluetoothConnections.has(serial)) {
+      this.log.error(`Bluetooth write rejected for unknown charger: ${id}`);
+      return;
+    }
+
+    try {
+      if (parts[3] === "control") {
+        await this.handleBluetoothControlWrite(id, serial, parts[4], state);
+        return;
+      }
+      if (parts[3] === "config") {
+        await this.handleBluetoothConfigWrite(id, serial, parts[4], state);
+        return;
+      }
+      throw new Error("This datapoint is not writable in Bluetooth mode");
+    } catch (error) {
+      await this.reportBluetoothWriteFailure(serial, id, error);
+    }
+  }
+
+  async handleBluetoothConfigWrite(
+    id: string,
+    serial: string,
+    key: string | undefined,
+    state: ioBroker.State,
+  ): Promise<void> {
+    const value = state.val;
+    switch (key) {
+      case "isEnabled":
+        if (typeof value !== "boolean") {
+          throw new Error("Charger enabled value must be boolean");
+        }
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          value,
+          { type: "setEnabled", enabled: value },
+          (result) => result.config.isEnabled === (value ? 1 : 0),
+        );
+        return;
+      case "maxChargerCurrent": {
+        const amperes = this.requireBluetoothAmperes(value);
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          value,
+          { type: "setMaxChargerCurrent", amperes },
+          (result) => result.config.maxChargerCurrent === amperes,
+        );
+        return;
+      }
+      case "dynamicChargerCurrent": {
+        const amperes = this.requireBluetoothAmperes(value);
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          value,
+          { type: "setDynamicChargerCurrent", amperes },
+          (result) => result.state.dynamicChargerCurrent === amperes,
+        );
+        if (amperes > 0) {
+          this.bluetoothPauseRestore.delete(serial);
+        }
+        return;
+      }
+      case "phaseMode":
+        if (value !== 1 && value !== 2 && value !== 3) {
+          throw new Error("Phase mode must be 1, 2 or 3");
+        }
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          value,
+          { type: "setPhaseMode", mode: value },
+          (result) => result.config.phaseMode === value,
+        );
+        return;
+      case "ledStripBrightness":
+        if (
+          typeof value !== "number" ||
+          !Number.isInteger(value) ||
+          value < 0 ||
+          value > 100
+        ) {
+          throw new Error("LED brightness must be an integer from 0 to 100");
+        }
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          value,
+          { type: "setLedBrightness", percent: value },
+          (result) => result.config.ledStripBrightness === value,
+        );
+        return;
+      case "lockCablePermanently":
+        if (typeof value !== "boolean") {
+          throw new Error("Permanent cable lock value must be boolean");
+        }
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          value,
+          { type: "setCableLocked", locked: value },
+          (result) => result.config.cableLocked === (value ? 1 : 0),
+        );
+        return;
+      case "circuitMaxCurrentP1":
+      case "circuitMaxCurrentP2":
+      case "circuitMaxCurrentP3":
+        await this.writeBluetoothCircuitMaximum(
+          id,
+          serial,
+          key.slice(-2).toLowerCase() as Phase,
+          value,
+        );
+        return;
+      case "dynamicCircuitCurrentP1":
+      case "dynamicCircuitCurrentP2":
+      case "dynamicCircuitCurrentP3":
+        this.queueBluetoothDynamicCircuitWrite(
+          id,
+          serial,
+          key.slice(-2).toLowerCase() as Phase,
+          value,
+        );
+        return;
+      default:
+        throw new Error(
+          `The config datapoint ${key ?? "(unknown)"} is not supported in Bluetooth mode`,
+        );
+    }
+  }
+
+  async handleBluetoothControlWrite(
+    id: string,
+    serial: string,
+    key: string | undefined,
+    state: ioBroker.State,
+  ): Promise<void> {
+    const client = this.bluetoothClient;
+    if (!client || !this.bluetoothConnections.get(serial)) {
+      throw new Error(`Bluetooth charger ${serial} is not connected`);
+    }
+
+    switch (key) {
+      case "pause": {
+        const generation = this.bluetoothConnectionGenerations.get(serial) ?? 0;
+        const current = await this.readBluetoothPoll(serial);
+        this.assertBluetoothConnectionGeneration(serial, generation);
+        const amperes = current.state.dynamicChargerCurrent;
+        if (
+          typeof amperes !== "number" ||
+          !Number.isInteger(amperes) ||
+          amperes <= 0 ||
+          amperes > 40
+        ) {
+          throw new Error(
+            "Pause is unavailable because no positive current limit is known",
+          );
+        }
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          state.val,
+          { type: "pauseCharging" },
+          (result) => result.state.dynamicChargerCurrent === 0,
+          undefined,
+          generation,
+        );
+        this.bluetoothPauseRestore.set(serial, { amperes, generation });
+        return;
+      }
+      case "resume": {
+        const restore = this.bluetoothPauseRestore.get(serial);
+        if (
+          !restore ||
+          restore.generation !==
+            (this.bluetoothConnectionGenerations.get(serial) ?? 0)
+        ) {
+          throw new Error(
+            "Resume is unavailable without a current limit saved by this connection",
+          );
+        }
+        const generation = this.bluetoothConnectionGenerations.get(serial) ?? 0;
+        const current = await this.readBluetoothPoll(serial);
+        this.assertBluetoothConnectionGeneration(serial, generation);
+        if (current.state.dynamicChargerCurrent !== 0) {
+          throw new Error(
+            "Resume was rejected because the charger is no longer paused",
+          );
+        }
+        await this.executeVerifiedBluetoothCommand(
+          serial,
+          id,
+          state.val,
+          { type: "resumeCharging", amperes: restore.amperes },
+          (result) => result.state.dynamicChargerCurrent === restore.amperes,
+          undefined,
+          generation,
+        );
+        this.bluetoothPauseRestore.delete(serial);
+        return;
+      }
+      case "reboot":
+        await client.command(serial, { type: "reboot" });
+        if (!(await this.waitForBluetoothDisconnect(serial, 15000))) {
+          throw new Error(
+            "The charger did not disconnect after the reboot request; execution is unconfirmed",
+          );
+        }
+        await this.setStateAsync(id, { val: state.val, ack: true });
+        return;
+      case "start":
+      case "stop":
+        throw new Error(
+          `The ${key} command is Cloud-only; charger enablement is not equivalent to a charging session command`,
+        );
+      default:
+        throw new Error(
+          `The control command ${key ?? "(unknown)"} is not supported in Bluetooth mode`,
+        );
+    }
+  }
+
+  async writeBluetoothCircuitMaximum(
+    id: string,
+    serial: string,
+    phase: Phase,
+    value: ioBroker.StateValue,
+  ): Promise<void> {
+    const amperes = this.requireBluetoothAmperes(value);
+    const generation = this.bluetoothConnectionGenerations.get(serial) ?? 0;
+    const current = await this.readBluetoothPoll(serial);
+    this.assertBluetoothConnectionGeneration(serial, generation);
+    const limits = [
+      current.config.circuitMaxCurrentP1,
+      current.config.circuitMaxCurrentP2,
+      current.config.circuitMaxCurrentP3,
+    ];
+    if (
+      limits.some(
+        (limit) =>
+          typeof limit !== "number" ||
+          !Number.isInteger(limit) ||
+          limit < 0 ||
+          limit > 40,
+      )
+    ) {
+      throw new Error(
+        "Current phase limits are unavailable; refusing to guess other phases",
+      );
+    }
+    const next = limits as [number, number, number];
+    const index = phase === "p1" ? 0 : phase === "p2" ? 1 : 2;
+    next[index] = amperes;
+    await this.executeVerifiedBluetoothCommand(
+      serial,
+      id,
+      value,
+      { type: "setMaxCircuitCurrent", amperes: next },
+      (result) =>
+        result.config.circuitMaxCurrentP1 === next[0] &&
+        result.config.circuitMaxCurrentP2 === next[1] &&
+        result.config.circuitMaxCurrentP3 === next[2],
+      undefined,
+      generation,
+    );
+  }
+
+  queueBluetoothDynamicCircuitWrite(
+    id: string,
+    serial: string,
+    phase: Phase,
+    value: ioBroker.StateValue,
+  ): void {
+    const amperes = this.requireBluetoothAmperes(value);
+    const sequence = ++this.bluetoothCircuitWriteSequence;
+    let pending = this.bluetoothCircuitWrites.get(serial);
+    if (!pending) {
+      pending = {
+        values: {},
+        stateIds: {},
+        sequence,
+        timer: undefined,
+      };
+      this.bluetoothCircuitWrites.set(serial, pending);
+    } else if (pending.timer) {
+      this.clearTimeout(pending.timer);
+      pending.sequence = sequence;
+    }
+    pending.values[phase] = amperes;
+    pending.stateIds[phase] = id;
+    pending.timer = this.setTimeout(() => {
+      this.bluetoothCircuitWrites.delete(serial);
+      void this.flushBluetoothDynamicCircuitWrite(serial, pending);
+    }, 500);
+  }
+
+  async flushBluetoothDynamicCircuitWrite(
+    serial: string,
+    pending: PendingBluetoothCircuitWrite,
+  ): Promise<void> {
+    try {
+      if (this.unloading || !this.bluetoothConnections.get(serial)) {
+        throw new Error(
+          "Pending dynamic circuit current update was discarded after disconnect",
+        );
+      }
+      const generation = this.bluetoothConnectionGenerations.get(serial) ?? 0;
+      const current = await this.readBluetoothPoll(serial);
+      this.assertBluetoothConnectionGeneration(serial, generation);
+      const newerPending = this.bluetoothCircuitWrites.get(serial);
+      if (newerPending && newerPending.sequence > pending.sequence) {
+        this.log.info(
+          `Discarded superseded Dynamic circuit current update for ${serial}`,
+        );
+        return;
+      }
+      const values = [
+        pending.values.p1 ?? current.state.dynamicCircuitCurrentP1,
+        pending.values.p2 ?? current.state.dynamicCircuitCurrentP2,
+        pending.values.p3 ?? current.state.dynamicCircuitCurrentP3,
+      ];
+      if (
+        values.some(
+          (value) =>
+            typeof value !== "number" ||
+            !Number.isInteger(value) ||
+            value < 0 ||
+            value > 40,
+        )
+      ) {
+        throw new Error(
+          "Current phase limits are unavailable; refusing to guess other phases",
+        );
+      }
+      const currents = values as [number, number, number];
+      const latestPending = this.bluetoothCircuitWrites.get(serial);
+      if (latestPending && latestPending.sequence > pending.sequence) {
+        this.log.info(
+          `Discarded superseded Dynamic circuit current update for ${serial}`,
+        );
+        return;
+      }
+      await this.executeVerifiedBluetoothCommand(
+        serial,
+        pending.stateIds.p1 ??
+          pending.stateIds.p2 ??
+          pending.stateIds.p3 ??
+          `${serial}.config.dynamicCircuitCurrentP1`,
+        pending.values.p1 ?? currents[0],
+        { type: "setDynamicCircuitCurrent", amperes: currents },
+        (result) =>
+          result.state.dynamicCircuitCurrentP1 === currents[0] &&
+          result.state.dynamicCircuitCurrentP2 === currents[1] &&
+          result.state.dynamicCircuitCurrentP3 === currents[2],
+        pending,
+        generation,
+      );
+    } catch (error) {
+      await this.reportBluetoothWriteFailure(
+        serial,
+        pending.stateIds.p1 ??
+          pending.stateIds.p2 ??
+          pending.stateIds.p3 ??
+          `${serial}.config.dynamicCircuitCurrentP1`,
+        error,
+      );
+    }
+  }
+
+  cancelBluetoothCircuitWrites(serial: string, reportLoss = true): void {
+    const pending = this.bluetoothCircuitWrites.get(serial);
+    if (!pending) {
+      return;
+    }
+    if (pending.timer) {
+      this.clearTimeout(pending.timer);
+    }
+    this.bluetoothCircuitWrites.delete(serial);
+    if (reportLoss) {
+      this.log.warn(
+        `Discarded pending dynamic circuit current update for ${serial} after connection loss`,
+      );
+    }
+  }
+
+  async executeVerifiedBluetoothCommand(
+    serial: string,
+    stateId: string,
+    requestedValue: ioBroker.StateValue,
+    command: BluetoothCommand,
+    verify: (result: Awaited<ReturnType<BluetoothClient["poll"]>>) => boolean,
+    pending?: PendingBluetoothCircuitWrite,
+    expectedGeneration = this.bluetoothConnectionGenerations.get(serial) ?? 0,
+  ): Promise<void> {
+    const client = this.bluetoothClient;
+    this.assertBluetoothConnectionGeneration(serial, expectedGeneration);
+    if (!client) {
+      throw new Error(`Bluetooth charger ${serial} is not connected`);
+    }
+    await client.command(serial, command);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await client.poll(serial);
+      this.assertBluetoothConnectionGeneration(serial, expectedGeneration);
+      await this.applyBluetoothPoll(serial, result);
+      if (verify(result)) {
+        if (pending) {
+          for (const phase of ["p1", "p2", "p3"] as const) {
+            const phaseStateId = pending.stateIds[phase];
+            const phaseValue = pending.values[phase];
+            if (phaseStateId && phaseValue !== undefined) {
+              await this.setStateAsync(phaseStateId, {
+                val: phaseValue,
+                ack: true,
+              });
+            }
+          }
+        } else {
+          await this.setStateAsync(stateId, {
+            val: requestedValue,
+            ack: true,
+          });
+        }
+        return;
+      }
+      if (attempt < 2) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 300));
+      }
+    }
+    throw new Error(
+      "The charger did not confirm the requested Bluetooth setting",
+    );
+  }
+
+  assertBluetoothConnectionGeneration(
+    serial: string,
+    expectedGeneration: number,
+  ): void {
+    if (
+      this.unloading ||
+      !this.bluetoothConnections.get(serial) ||
+      (this.bluetoothConnectionGenerations.get(serial) ?? 0) !==
+        expectedGeneration
+    ) {
+      throw new Error(
+        `Bluetooth connection for ${serial} changed; refusing to send or confirm a stale command`,
+      );
+    }
+  }
+
+  async waitForBluetoothDisconnect(
+    serial: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (!this.bluetoothConnections.get(serial)) {
+      return true;
+    }
+    return await new Promise<boolean>((resolve) => {
+      let timer: Timer = undefined;
+      const waiters =
+        this.bluetoothDisconnectWaiters.get(serial) ??
+        new Set<(disconnected: boolean) => void>();
+      const finish = (disconnected: boolean): void => {
+        if (timer) {
+          this.clearTimeout(timer);
+        }
+        waiters.delete(finish);
+        if (waiters.size) {
+          this.bluetoothDisconnectWaiters.set(serial, waiters);
+        } else {
+          this.bluetoothDisconnectWaiters.delete(serial);
+        }
+        resolve(disconnected);
+      };
+      waiters.add(finish);
+      this.bluetoothDisconnectWaiters.set(serial, waiters);
+      timer = this.setTimeout(() => finish(false), timeoutMs);
+    });
+  }
+
+  requireBluetoothAmperes(value: ioBroker.StateValue): number {
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value > 40
+    ) {
+      throw new Error("Current must be an integer between 0 and 40 A");
+    }
+    return value;
+  }
+
+  async reportBluetoothWriteFailure(
+    serial: string,
+    id: string,
+    error: unknown,
+  ): Promise<void> {
+    const message = errorMessage(error);
+    this.log.error(`Bluetooth write failed for ${id}: ${message}`);
+    if (this.unloading) {
+      return;
+    }
+    this.bluetoothConnectionErrors.set(serial, message);
+    try {
+      await this.setStateAsync(`${serial}.info.bluetoothError`, message, true);
+    } catch (writeError) {
+      this.log.error(
+        `Could not report Bluetooth write error for ${serial}: ${errorMessage(writeError)}`,
+      );
+    }
+  }
+
   configureSessionPolling(): void {
     this.sessionPollMode =
       this.config.sessionPollMode === "manual" ? "manual" : "auto";
@@ -514,6 +1372,23 @@ class Easee extends Adapter {
   onUnload(callback: () => void): void {
     this.unloading = true;
     this.clearTimeout(adapterIntervals.readAllStates);
+    if (this.bluetoothReconnectTimer) {
+      this.clearTimeout(this.bluetoothReconnectTimer);
+    }
+    this.bluetoothReconnectTimer = null;
+    if (this.bluetoothPollTimer) {
+      this.clearTimeout(this.bluetoothPollTimer);
+    }
+    this.bluetoothPollTimer = null;
+    for (const serial of this.bluetoothCircuitWrites?.keys() ?? []) {
+      this.cancelBluetoothCircuitWrites(serial, false);
+    }
+    for (const waiters of this.bluetoothDisconnectWaiters?.values() ?? []) {
+      for (const resolve of [...waiters]) {
+        resolve(false);
+      }
+    }
+    this.bluetoothPauseRestore?.clear();
     if (this.sessionPollTimer) {
       this.clearTimeout(this.sessionPollTimer);
     }
@@ -550,13 +1425,20 @@ class Easee extends Adapter {
       (error) =>
         this.log.warn(`Error stopping session polling: ${errorMessage(error)}`),
     );
-    Promise.all([signalRShutdown, pendingSessionShutdown])
+    const bluetoothShutdown = Promise.resolve(
+      this.bluetoothClient?.stop(),
+    ).catch((error) =>
+      this.log.warn(`Error stopping Bluetooth client: ${errorMessage(error)}`),
+    );
+    Promise.all([signalRShutdown, pendingSessionShutdown, bluetoothShutdown])
       .then(() => this.setStateAsync("info.connection", false, true))
       .catch((error) =>
         this.log.error(`Error during unload: ${errorMessage(error)}`),
       )
       .finally(() => {
         this.signalRConnection = null;
+        this.bluetoothClient = null;
+        this.bluetoothStartupComplete = false;
         this.log.info("Adapter easee cleaned up everything...");
         callback();
       });
@@ -1103,6 +1985,12 @@ class Easee extends Adapter {
     if (state) {
       // The state was changed
       this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
+      if (this.connectionMode === "bluetooth") {
+        if (!state.ack) {
+          void this.handleBluetoothStateChange(id, state);
+        }
+        return;
+      }
       const tmpControl = id.split(".");
       if (tmpControl.length === 4 && tmpControl[3] === "name") {
         if (!state.ack) {
