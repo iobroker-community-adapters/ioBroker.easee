@@ -148,6 +148,9 @@ const apiUrl = "https://api.easee.com";
 const apiRequestTimeout = 30000;
 const sessionRequestInterval = 7 * 60 * 1000;
 const defaultSessionPollInterval = 60;
+const maxTimeoutMilliseconds = 2_147_483_647;
+axios.defaults.timeout = apiRequestTimeout;
+const safeObjectIdSegment = /^[A-Za-z0-9_-]+$/;
 const adapterIntervals: Record<string, Timer | undefined> = {}; //halten von allen Intervallen
 let accessToken = "";
 let refreshToken = "";
@@ -186,11 +189,14 @@ function getRateLimitDelay(error: unknown): number {
   if (retryAfter !== undefined) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds)) {
-      return Math.max(0, seconds * 1000);
+      return Math.min(maxTimeoutMilliseconds, Math.max(0, seconds * 1000));
     }
     const retryAt = Date.parse(retryAfter);
     if (Number.isFinite(retryAt)) {
-      return Math.max(0, retryAt - Date.now());
+      return Math.min(
+        maxTimeoutMilliseconds,
+        Math.max(0, retryAt - Date.now()),
+      );
     }
   }
 
@@ -200,12 +206,15 @@ function getRateLimitDelay(error: unknown): number {
   if (remaining === 0) {
     const reset = Number(header("ratelimit-reset"));
     if (Number.isFinite(reset)) {
-      return Math.max(0, reset * 1000);
+      return Math.min(maxTimeoutMilliseconds, Math.max(0, reset * 1000));
     }
     const legacyReset = Number(header("x-ratelimit-reset"));
     if (Number.isFinite(legacyReset)) {
       const resetAt = legacyReset > 1e12 ? legacyReset : legacyReset * 1000;
-      return Math.max(0, resetAt - Date.now());
+      return Math.min(
+        maxTimeoutMilliseconds,
+        Math.max(0, resetAt - Date.now()),
+      );
     }
   }
 
@@ -355,6 +364,12 @@ class Easee extends Adapter {
     if (typeof data.mid !== "string" || !data.mid) {
       return;
     }
+    if (!safeObjectIdSegment.test(data.mid)) {
+      this.log.warn(
+        `Ignoring SignalR update with invalid charger id: ${data.mid}`,
+      );
+      return;
+    }
 
     let value: ioBroker.StateValue = data.value;
     switch (data.dataType) {
@@ -462,7 +477,9 @@ class Easee extends Adapter {
     }
     this.clearTimeout(adapterIntervals.signalRReconnect);
     adapterIntervals.signalRReconnect = this.setTimeout(() => {
-      this.startSignal();
+      this.startSignal().catch((error) =>
+        this.log.warn(`SignalR reconnect failed: ${errorMessage(error)}`),
+      );
     }, 30000);
   }
 
@@ -502,11 +519,18 @@ class Easee extends Adapter {
       this.sessionLastRequestAt = lastSessionRequest.val;
     }
 
-    //Schauen ob die Polltime realistisch ist
-    if (this.config.polltime < 1) {
-      this.log.error("Interval in seconds to short -> go to default 30");
+    const configuredPollInterval = Number(this.config.polltime);
+    polltime = 30;
+    if (
+      !Number.isFinite(configuredPollInterval) ||
+      configuredPollInterval < 10 ||
+      configuredPollInterval > 86_400
+    ) {
+      this.log.warn(
+        "Poll interval must be between 10 and 86400 seconds; using 30",
+      );
     } else {
-      polltime = this.config.polltime;
+      polltime = configuredPollInterval;
     }
     logtype = this.config.logtype;
     // Testen ob der Login funktioniert
@@ -539,7 +563,9 @@ class Easee extends Adapter {
 
         if (this.config.signalR) {
           this.log.info("Starting SignalR");
-          this.startSignal();
+          this.startSignal().catch((error) =>
+            this.log.warn(`SignalR start failed: ${errorMessage(error)}`),
+          );
         }
         // Start polling without delaying SignalR on a slow API response.
         await this.readAllStates();
@@ -623,7 +649,7 @@ class Easee extends Adapter {
         common: {
           name: "Bluetooth connection",
           type: "boolean",
-          role: "indicator.connected",
+          role: "indicator.reachable",
           read: true,
           write: false,
           def: false,
@@ -977,6 +1003,9 @@ class Easee extends Adapter {
     key: string | undefined,
     state: ioBroker.State,
   ): Promise<void> {
+    if (state.val !== true) {
+      throw new Error("Control buttons can only be triggered with true");
+    }
     const client = this.bluetoothClient;
     if (!client || !this.bluetoothConnections.get(serial)) {
       throw new Error(`Bluetooth charger ${serial} is not connected`);
@@ -1351,19 +1380,65 @@ class Easee extends Adapter {
     }
   }
 
+  async executeCloudControlWrite(
+    id: string,
+    chargerId: string,
+    command: "start" | "stop" | "pause" | "resume" | "reboot",
+    value: ioBroker.StateValue,
+  ): Promise<void> {
+    if (this.unloading) {
+      return;
+    }
+    if (value !== true) {
+      this.log.error(`Invalid control value for ${id}: expected true`);
+      return;
+    }
+
+    try {
+      switch (command) {
+        case "start":
+          this.log.info(`Starting charging for charger ${chargerId}`);
+          await this.startCharging(chargerId);
+          break;
+        case "stop":
+          this.log.info(`Stopping charging for charger ${chargerId}`);
+          await this.stopCharging(chargerId);
+          break;
+        case "pause":
+          this.log.info(`Pausing charging for charger ${chargerId}`);
+          await this.pauseCharging(chargerId);
+          break;
+        case "resume":
+          this.log.info(`Resuming charging for charger ${chargerId}`);
+          await this.resumeCharging(chargerId);
+          break;
+        case "reboot":
+          this.log.info(`Rebooting charger ${chargerId}`);
+          await this.rebootCharging(chargerId);
+          break;
+      }
+      await this.setStateAsync(id, { val: true, ack: true });
+    } catch (error) {
+      this.log.error(
+        `Cloud ${command} command failed for charger ${chargerId}: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   configureSessionPolling(): void {
     this.sessionPollMode =
       this.config.sessionPollMode === "manual" ? "manual" : "auto";
     const configuredInterval = Number(this.config.sessionPollInterval);
+    const maxSessionPollInterval = Math.floor(maxTimeoutMilliseconds / 60_000);
     this.sessionManualInterval = Number.isFinite(configuredInterval)
-      ? Math.max(7, configuredInterval)
+      ? Math.min(maxSessionPollInterval, Math.max(7, configuredInterval))
       : defaultSessionPollInterval;
     if (
       this.sessionPollMode === "manual" &&
       this.sessionManualInterval !== configuredInterval
     ) {
       this.log.warn(
-        "Manual session interval must be at least 7 minutes; using 7 minutes",
+        `Manual session interval must be between 7 and ${maxSessionPollInterval} minutes; using a safe interval`,
       );
     }
   }
@@ -1552,6 +1627,10 @@ class Easee extends Adapter {
           update,
           sequence,
           requireCircuit,
+        ).catch((error) =>
+          this.log.error(
+            `${description} retry failed for ${chargerId}: ${errorMessage(error)}`,
+          ),
         );
       }, delay);
       this.pendingSiteConfigRetries.set(retryKey, { timer });
@@ -1704,9 +1783,54 @@ class Easee extends Adapter {
     if (this.unloading) {
       return;
     }
-    if (tmpAllChargers != undefined) {
-      this.updateSessionChargers(tmpAllChargers);
-      for (const charger of tmpAllChargers) {
+    if (Array.isArray(tmpAllChargers)) {
+      const chargers: Charger[] = [];
+      const seenChargerIds = new Set<string>();
+      const knownChargerIds = new Map(
+        this.chargerIds.map((id) => [id.toLowerCase(), id]),
+      );
+      for (const item of tmpAllChargers) {
+        if (
+          !isRecord(item) ||
+          typeof item.id !== "string" ||
+          !safeObjectIdSegment.test(item.id)
+        ) {
+          this.log.warn("Ignoring charger with an invalid Cloud id");
+          continue;
+        }
+        const normalizedId = item.id.toLowerCase();
+        const knownId = knownChargerIds.get(normalizedId);
+        if (knownId && knownId !== item.id) {
+          this.log.warn(
+            `Ignoring charger id with conflicting casing: ${item.id}`,
+          );
+          continue;
+        }
+        if (seenChargerIds.has(normalizedId)) {
+          this.log.warn(`Ignoring duplicate charger id: ${item.id}`);
+          continue;
+        }
+        seenChargerIds.add(normalizedId);
+        chargers.push({
+          id: item.id,
+          name:
+            typeof item.name === "string" && item.name.trim()
+              ? item.name
+              : item.id,
+        });
+      }
+
+      if (chargers.length > 0 || tmpAllChargers.length === 0) {
+        this.updateSessionChargers(chargers);
+      } else {
+        this.log.warn(
+          "No valid chargers were returned; retaining the previous session polling list",
+        );
+      }
+      if (tmpAllChargers.length === 0) {
+        this.log.info("No chargers are configured in the Easee Cloud account");
+      }
+      for (const charger of chargers) {
         if (this.unloading) {
           return;
         }
@@ -1757,15 +1881,13 @@ class Easee extends Adapter {
           if (isRetryableError(error)) {
             continue;
           }
-          if (typeof error === "string") {
-            this.log.error(error);
-          } else if (error instanceof Error) {
-            this.log.error(error.message);
-          }
+          this.log.error(errorMessage(error));
         }
       }
+    } else if (tmpAllChargers !== undefined) {
+      this.log.warn("Ignoring invalid charger list returned by Easee Cloud");
     } else {
-      this.log.warn("No Chargers found!");
+      this.log.warn("No charger list was returned; the adapter will retry");
     }
 
     if (this.unloading) {
@@ -1877,12 +1999,15 @@ class Easee extends Adapter {
     if (this.sessionPollTimer) {
       this.clearTimeout(this.sessionPollTimer);
     }
+    const safeDelay = Number.isFinite(delay)
+      ? Math.min(maxTimeoutMilliseconds, Math.max(0, delay))
+      : maxTimeoutMilliseconds;
     this.sessionPollTimer = this.setTimeout(() => {
       this.sessionPollTimer = null;
       this.pollNextSession().catch((error) => {
         this.log.warn(`Session polling failed: ${errorMessage(error)}`);
       });
-    }, delay);
+    }, safeDelay);
   }
 
   async pollNextSession(): Promise<void> {
@@ -1985,10 +2110,11 @@ class Easee extends Adapter {
     if (state) {
       // The state was changed
       this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
+      if (state.ack) {
+        return;
+      }
       if (this.connectionMode === "bluetooth") {
-        if (!state.ack) {
-          void this.handleBluetoothStateChange(id, state);
-        }
+        void this.handleBluetoothStateChange(id, state);
         return;
       }
       const tmpControl = id.split(".");
@@ -2024,6 +2150,10 @@ class Easee extends Adapter {
                 this.log.debug("Changes sent to API");
               },
               ++this.circuitMaxCurrentSequence,
+            ).catch((error) =>
+              this.log.error(
+                `Circuit current update failed: ${errorMessage(error)}`,
+              ),
             );
           } else if (
             tmpControl[4] == "dynamicCircuitCurrentP1" ||
@@ -2136,13 +2266,17 @@ class Easee extends Adapter {
               },
               undefined,
               false,
+            ).catch((error) =>
+              this.log.error(
+                `Charging price update failed: ${errorMessage(error)}`,
+              ),
             );
           } else {
             this.log.debug(`update config to API: ${id}`);
             if (tmpControl[4] == "isEnabled") {
-              this.changeConfig(tmpControl[2], "enabled", state.val);
+              void this.changeConfig(tmpControl[2], "enabled", state.val);
             } else {
-              this.changeConfig(tmpControl[2], tmpControl[4], state.val);
+              void this.changeConfig(tmpControl[2], tmpControl[4], state.val);
             }
             this.log.debug("Changes sent to API");
           }
@@ -2151,29 +2285,44 @@ class Easee extends Adapter {
         // control charger
         switch (tmpControl[4]) {
           case "start":
-            // Starten Ladevorgang
-            this.log.info(`Starting charging for Charger.id: ${tmpControl[2]}`);
-            this.startCharging(tmpControl[2]);
+            void this.executeCloudControlWrite(
+              id,
+              tmpControl[2],
+              "start",
+              state.val,
+            );
             break;
           case "stop":
-            //  Stopen Ladevorgang
-            this.log.info(`Stopping charging for Charger.id: ${tmpControl[2]}`);
-            this.stopCharging(tmpControl[2]);
+            void this.executeCloudControlWrite(
+              id,
+              tmpControl[2],
+              "stop",
+              state.val,
+            );
             break;
           case "pause":
-            //  Pausiere Ladevorgang
-            this.log.info(`Pause charging for Charger.id: ${tmpControl[2]}`);
-            this.pauseCharging(tmpControl[2]);
+            void this.executeCloudControlWrite(
+              id,
+              tmpControl[2],
+              "pause",
+              state.val,
+            );
             break;
           case "resume":
-            //  Resume Ladevorgang
-            this.log.info(`Resume charging for Charger.id: ${tmpControl[2]}`);
-            this.resumeCharging(tmpControl[2]);
+            void this.executeCloudControlWrite(
+              id,
+              tmpControl[2],
+              "resume",
+              state.val,
+            );
             break;
           case "reboot":
-            //  Reboot Charger
-            this.log.info(`Reboot Charger.id: ${tmpControl[2]}`);
-            this.rebootCharging(tmpControl[2]);
+            void this.executeCloudControlWrite(
+              id,
+              tmpControl[2],
+              "reboot",
+              state.val,
+            );
             break;
           default:
             this.log.error(`No command for Control found for: ${id}`);
@@ -2479,7 +2628,7 @@ class Easee extends Adapter {
       ack: true,
     });
     await this.setStateAsync(`${charger.id}.config.circuitMaxCurrentP2`, {
-      val: charger_config.circuitMaxCurrentP3,
+      val: charger_config.circuitMaxCurrentP2,
       ack: true,
     });
     await this.setStateAsync(`${charger.id}.config.circuitMaxCurrentP3`, {
@@ -2521,11 +2670,7 @@ class Easee extends Adapter {
       return true;
     } catch (error) {
       this.log.error("Api login error - check Username and password");
-      if (typeof error === "string") {
-        this.log.error(error);
-      } else if (error instanceof Error) {
-        this.log.error(error.message);
-      }
+      this.log.error(errorMessage(error));
       await this.setStateAsync("info.connection", false, true);
       return false;
     }
@@ -2560,7 +2705,7 @@ class Easee extends Adapter {
       })
       .catch(async (error) => {
         this.log.error("RefreshToken error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
         await this.setStateAsync("info.connection", false, true);
       });
   }
@@ -2573,12 +2718,12 @@ class Easee extends Adapter {
         timeout: apiRequestTimeout,
       })
       .then((response) => {
-        this.log.debug("Chargers ausgelesen");
+        this.log.debug("Chargers retrieved");
         this.log.debug(JSON.stringify(response.data));
         return response.data;
       })
       .catch((error) => {
-        this.log.error(error);
+        this.log.error(errorMessage(error));
         return undefined;
       });
   }
@@ -2686,11 +2831,14 @@ class Easee extends Adapter {
     const response = await this.requestWithBackoff(
       `charger observations ${charger_id}`,
       () =>
-        axios.get(`${apiUrl}/state/${charger_id}/observations`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          params: { ids: CHARGER_STATE_OBSERVATION_IDS.join(",") },
-          timeout: apiRequestTimeout,
-        }),
+        axios.get(
+          `${apiUrl}/state/${encodeURIComponent(charger_id)}/observations`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            params: { ids: CHARGER_STATE_OBSERVATION_IDS.join(",") },
+            timeout: apiRequestTimeout,
+          },
+        ),
     );
     this.log.debug(`Charger observations read for id: ${charger_id}`);
     this.log.debug(JSON.stringify(response.data));
@@ -2705,12 +2853,15 @@ class Easee extends Adapter {
     const response = await this.requestWithBackoff(
       `charger config ${charger_id}`,
       () =>
-        axios.get(`${apiUrl}/api/chargers/${charger_id}/config`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          timeout: apiRequestTimeout,
-        }),
+        axios.get(
+          `${apiUrl}/api/chargers/${encodeURIComponent(charger_id)}/config`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            timeout: apiRequestTimeout,
+          },
+        ),
     );
-    this.log.debug(`Charger config ausgelesen mit id: ${charger_id}`);
+    this.log.debug(`Charger config retrieved for id: ${charger_id}`);
     this.log.debug(JSON.stringify(response.data));
     return response.data;
   }
@@ -2719,12 +2870,15 @@ class Easee extends Adapter {
     const response = await this.requestWithBackoff(
       `charger site ${charger_id}`,
       () =>
-        axios.get(`${apiUrl}/api/chargers/${charger_id}/site`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          timeout: apiRequestTimeout,
-        }),
+        axios.get(
+          `${apiUrl}/api/chargers/${encodeURIComponent(charger_id)}/site`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            timeout: apiRequestTimeout,
+          },
+        ),
     );
-    this.log.debug(`Charger site ausgelesen mit id: ${charger_id}`);
+    this.log.debug(`Charger site retrieved for id: ${charger_id}`);
     this.log.debug(JSON.stringify(response.data));
     return response.data;
   }
@@ -2736,13 +2890,16 @@ class Easee extends Adapter {
     const response = await this.requestWithBackoff(
       `charger session ${charger_id}`,
       () =>
-        axios.get(`${apiUrl}/api/sessions/charger/${charger_id}/monthly`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          timeout: apiRequestTimeout,
-          signal,
-        }),
+        axios.get(
+          `${apiUrl}/api/sessions/charger/${encodeURIComponent(charger_id)}/monthly`,
+          {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            timeout: apiRequestTimeout,
+            signal,
+          },
+        ),
     );
-    this.log.debug(`Charger session ausgelesen mit id: ${charger_id}`);
+    this.log.debug(`Charger session retrieved for id: ${charger_id}`);
     this.log.debug(JSON.stringify(response.data));
     return response.data;
   }
@@ -2950,7 +3107,7 @@ class Easee extends Adapter {
     }
     const grossPrice = netPrice * (1 + vat / 100);
     await axios.post(
-      `${apiUrl}/api/sites/${site.id}/price`,
+      `${apiUrl}/api/sites/${encodeURIComponent(String(site.id))}/price`,
       {
         currencyId,
         costPerKWh: grossPrice,
@@ -2977,7 +3134,7 @@ class Easee extends Adapter {
   async startCharging(id: string): Promise<void> {
     return await axios
       .post(
-        `${apiUrl}/api/chargers/${id}/commands/start_charging`,
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/start_charging`,
         {},
         { headers: { Authorization: `Bearer ${accessToken}` } },
       )
@@ -2987,14 +3144,15 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Start charging error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
+        throw error;
       });
   }
 
   async stopCharging(id: string): Promise<void> {
     return await axios
       .post(
-        `${apiUrl}/api/chargers/${id}/commands/stop_charging`,
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/stop_charging`,
         {},
         { headers: { Authorization: `Bearer ${accessToken}` } },
       )
@@ -3004,14 +3162,15 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Stop charging error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
+        throw error;
       });
   }
 
   async pauseCharging(id: string): Promise<void> {
     return await axios
       .post(
-        `${apiUrl}/api/chargers/${id}/commands/pause_charging`,
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/pause_charging`,
         {},
         { headers: { Authorization: `Bearer ${accessToken}` } },
       )
@@ -3021,14 +3180,15 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Pause charging error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
+        throw error;
       });
   }
 
   async resumeCharging(id: string): Promise<void> {
     return await axios
       .post(
-        `${apiUrl}/api/chargers/${id}/commands/resume_charging`,
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/resume_charging`,
         {},
         { headers: { Authorization: `Bearer ${accessToken}` } },
       )
@@ -3038,14 +3198,15 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Resume charging error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
+        throw error;
       });
   }
 
   async rebootCharging(id: string): Promise<void> {
     return await axios
       .post(
-        `${apiUrl}/api/chargers/${id}/commands/reboot`,
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/reboot`,
         {},
         { headers: { Authorization: `Bearer ${accessToken}` } },
       )
@@ -3055,7 +3216,8 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Reboot charging error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
+        throw error;
       });
   }
 
@@ -3071,7 +3233,7 @@ class Easee extends Adapter {
     );
     return await axios
       .post(
-        `${apiUrl}/api/chargers/${id}/settings`,
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/settings`,
         {
           [configvalue]: value,
         },
@@ -3085,7 +3247,7 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Config update error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
       });
   }
 
@@ -3097,7 +3259,7 @@ class Easee extends Adapter {
   ): Promise<void> {
     return await axios
       .post(
-        `${apiUrl}/api/sites/${site_id}/circuits/${circuit_id}/settings`,
+        `${apiUrl}/api/sites/${encodeURIComponent(site_id)}/circuits/${encodeURIComponent(circuit_id)}/settings`,
         {
           maxCircuitCurrentP1: value,
           maxCircuitCurrentP2: value,
@@ -3111,7 +3273,7 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("CircuitMax update error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
       });
   }
 
@@ -3124,7 +3286,7 @@ class Easee extends Adapter {
     //Der Wert darf nur für 3 Fach Werte aktualisiert werden
     await axios
       .post(
-        `${apiUrl}/api/sites/${site_id}/circuits/${circuit_id}/settings`,
+        `${apiUrl}/api/sites/${encodeURIComponent(site_id)}/circuits/${encodeURIComponent(circuit_id)}/settings`,
         {
           dynamicCircuitCurrentP1: currentValues.p1,
           dynamicCircuitCurrentP2: currentValues.p2,
@@ -3142,7 +3304,7 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.error("Circuit update error");
-        this.log.error(error);
+        this.log.error(errorMessage(error));
       });
   }
 
@@ -3157,8 +3319,8 @@ class Easee extends Adapter {
       common: {
         name: "Start charging",
         type: "boolean",
-        role: "button",
-        read: true,
+        role: "button.start",
+        read: false,
         write: true,
       },
       native: {},
@@ -3170,7 +3332,7 @@ class Easee extends Adapter {
       common: {
         name: "Stop charging",
         type: "boolean",
-        role: "button",
+        role: "button.stop",
         read: false,
         write: true,
       },
@@ -3196,7 +3358,7 @@ class Easee extends Adapter {
       common: {
         name: "Resume charging",
         type: "boolean",
-        role: "button",
+        role: "button.resume",
         read: false,
         write: true,
       },
@@ -3210,7 +3372,7 @@ class Easee extends Adapter {
         name: "Reboot Charger",
         type: "boolean",
         role: "button",
-        read: true,
+        read: false,
         write: true,
       },
       native: {},
@@ -3622,7 +3784,7 @@ class Easee extends Adapter {
       common: {
         name: "Accumulated energy in the lifetime of the charger [kWh]",
         type: "number",
-        role: "value.power.consumption",
+        role: "value.energy.consumed",
         read: true,
         write: false,
         unit: "kWh",
@@ -3636,21 +3798,7 @@ class Easee extends Adapter {
       common: {
         name: "Accumulated energy per hour [kWh]",
         type: "number",
-        role: "value.power.consumption",
-        read: true,
-        write: false,
-        unit: "kWh",
-      },
-      native: {},
-    });
-
-    //"energyPerHour": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.energyPerHour`, {
-      type: "state",
-      common: {
-        name: "Accumulated energy per hour [kWh]",
-        type: "number",
-        role: "value.power.consumption",
+        role: "value.energy.consumed",
         read: true,
         write: false,
         unit: "kWh",
@@ -3680,6 +3828,21 @@ class Easee extends Adapter {
   ): Promise<void> {
     this.log.debug(JSON.stringify(charger_session));
     for (const session of charger_session) {
+      if (
+        !Number.isInteger(session.year) ||
+        session.year < 0 ||
+        session.year > 9999 ||
+        !Number.isInteger(session.month) ||
+        session.month < 1 ||
+        session.month > 12 ||
+        !Number.isFinite(session.totalEnergyUsage) ||
+        !Number.isFinite(session.totalCost)
+      ) {
+        this.log.warn(
+          `Ignoring a session with invalid date or totals for charger ${charger.id}`,
+        );
+        continue;
+      }
       //für jeden Monat errechnen wir das?
       await this.setObjectNotExistsAsync(
         `${charger.id}.session.${session.year}.${
@@ -3773,7 +3936,7 @@ class Easee extends Adapter {
       common: {
         name: "Charging price including VAT per kWh",
         type: "number",
-        role: "value.price",
+        role: "value",
         read: true,
         write: false,
       },
@@ -3787,7 +3950,7 @@ class Easee extends Adapter {
         common: {
           name: "Charging price excluding VAT per kWh",
           type: "number",
-          role: "value.price",
+          role: "state",
           read: true,
           write: true,
         },
@@ -3801,7 +3964,7 @@ class Easee extends Adapter {
       common: {
         name: "Value added tax for charging price",
         type: "number",
-        role: "value.tax",
+        role: "state",
         read: true,
         write: true,
         unit: "%",
@@ -3816,7 +3979,7 @@ class Easee extends Adapter {
       common: {
         name: "Set true to enable charger, false disables charger",
         type: "boolean",
-        role: "switch.enabled",
+        role: "switch.enable",
         read: true,
         write: true,
       },
@@ -3974,7 +4137,7 @@ class Easee extends Adapter {
         native: {},
       },
     );
-    //this.subscribeStates(charger.id + '.config.circuitMaxCurrentP3');
+    this.subscribeStates(`${charger.id}.config.circuitMaxCurrentP3`);
 
     //ledStripBrightness
     await this.setObjectNotExistsAsync(

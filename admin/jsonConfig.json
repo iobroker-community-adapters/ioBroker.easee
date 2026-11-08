@@ -6,7 +6,7 @@
             "newLine": true,
             "type": "header",
             "size": 2,
-            "text": "Account Settings",
+            "text": "Account settings",
             "hidden": "data.connectionMode !== 'cloud'"
         },
         "connectionMode": {
@@ -434,7 +434,7 @@
         },
         "polltime": {
             "type": "number",
-            "min": 360,
+            "min": 10,
             "max": 86400,
             "xs": 12,
             "sm": 12,
@@ -476,6 +476,7 @@
             "lg": 4,
             "xl": 4,
             "min": 7,
+            "max": 35791,
             "step": 1,
             "unit": "min",
             "default": 60,

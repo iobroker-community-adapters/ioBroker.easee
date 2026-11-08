@@ -16,6 +16,12 @@
 
 Adapter to connect [Easee Wallboxes](https://easee.com/).
 
+## Requirements
+
+- Node.js 22.19.0 or newer
+- ioBroker js-controller 7.2.2 or newer
+- ioBroker Admin 7.7.22 or newer
+
 ## Help
 
 The adapter can use either the existing Easee Cloud connection or a local
@@ -58,6 +64,7 @@ This adapter would not have been possible without the great work of @Newan (http
 -->
 ### **WORK IN PROGRESS**
 - Added an optional local Bluetooth connection mode with configured chargers and PINs.
+- Corrected circuit phase reporting and command acknowledgements, and reject unsafe external charger IDs.
 
 ### 3.2.0 (2026-11-07)
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.

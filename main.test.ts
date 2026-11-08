@@ -925,6 +925,30 @@ describe("Easee polling regressions", () => {
         true,
       ),
     ).to.equal(true);
+    expect(
+      setObjectNotExistsAsync.calledWith(
+        "charger.control.start",
+        sinon.match({
+          common: sinon.match({
+            role: "button.start",
+            read: false,
+            write: true,
+          }),
+        }),
+      ),
+    ).to.equal(true);
+    expect(
+      setObjectNotExistsAsync.calledWith(
+        "charger.control.reboot",
+        sinon.match({
+          common: sinon.match({
+            role: "button",
+            read: false,
+            write: true,
+          }),
+        }),
+      ),
+    ).to.equal(true);
   });
 
   it("clears the previous authorization token once when charging starts", async () => {
@@ -1295,6 +1319,61 @@ describe("Easee polling regressions", () => {
     ).to.equal(true);
   });
 
+  it("subscribes to phase 3 circuit limits and assigns a supported switch role", async () => {
+    const adapter = createAdapterHarness();
+    const setObjectNotExistsAsync = sinon.stub().resolves();
+    adapter.setObjectNotExistsAsync = setObjectNotExistsAsync;
+    adapter.extendObjectAsync = sinon.stub().resolves();
+    adapter.subscribeStates = sinon.stub();
+
+    await adapter.setAllConfigObjects({ id: "charger", name: "Charger" });
+
+    expect(
+      adapter.subscribeStates.calledWithExactly(
+        "charger.config.circuitMaxCurrentP3",
+      ),
+    ).to.equal(true);
+    expect(
+      setObjectNotExistsAsync.calledWith(
+        "charger.config.isEnabled",
+        sinon.match({
+          common: sinon.match({
+            role: "switch.enable",
+            read: true,
+            write: true,
+          }),
+        }),
+      ),
+    ).to.equal(true);
+  });
+
+  it("writes the configured phase 2 circuit limit to the phase 2 state", async () => {
+    const adapter = createAdapterHarness();
+
+    await adapter.setConfigStatus(
+      { id: "charger" },
+      {
+        isEnabled: true,
+        phaseMode: 2,
+        ledStripBrightness: 50,
+        smartButtonEnabled: true,
+        wiFiSSID: "network",
+        maxChargerCurrent: 32,
+        circuitMaxCurrentP1: 16,
+        circuitMaxCurrentP2: 20,
+        circuitMaxCurrentP3: 24,
+      },
+      null,
+    );
+
+    expect(
+      adapter.setStateAsync.calledWithExactly(
+        "charger.config.circuitMaxCurrentP2",
+        { val: 20, ack: true },
+      ),
+    ).to.equal(true);
+  });
+
   it("updates only access metadata on an existing permanent cable lock state", async () => {
     const adapter = createAdapterHarness();
     adapter.setObjectNotExistsAsync = sinon.stub().resolves();
@@ -1483,6 +1562,20 @@ describe("Easee polling regressions", () => {
     expect(adapter.sessionManualInterval).to.equal(60);
   });
 
+  it("caps configured manual session intervals to a safe timer range", () => {
+    const adapter = createAdapterHarness();
+    adapter.config = {
+      sessionPollMode: "manual",
+      sessionPollInterval: Number.MAX_SAFE_INTEGER,
+    };
+
+    adapter.configureSessionPolling();
+
+    expect(adapter.sessionManualInterval).to.equal(
+      Math.floor(2_147_483_647 / 60_000),
+    );
+  });
+
   it("starts immediately and never overlaps or duplicates session requests", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
@@ -1570,6 +1663,28 @@ describe("Easee polling regressions", () => {
     expect(
       adapter.apiRetryState.get("charger session charger-a").retryAt,
     ).to.equal(clock.now + 7 * 60 * 1000);
+  });
+
+  it("caps an excessive Retry-After value to the maximum Node timer delay", async () => {
+    const adapter = createAdapterHarness();
+    const clock = sinon.useFakeTimers();
+    adapter.requestWithBackoff =
+      createAdapter.Easee.prototype.requestWithBackoff;
+
+    try {
+      await adapter.requestWithBackoff(
+        "charger config charger-a",
+        sinon.stub().rejects({
+          response: { status: 429, headers: { "retry-after": "999999999" } },
+        }),
+      );
+    } catch (error) {
+      expect(error).to.have.property("retryDeferred", true);
+    }
+
+    expect(
+      adapter.apiRetryState.get("charger config charger-a").retryAt,
+    ).to.equal(clock.now + 2_147_483_647);
   });
 
   it("uses standard rate-limit reset headers when the bucket is empty", async () => {
@@ -1688,6 +1803,111 @@ describe("Easee polling regressions", () => {
     expect(clock.countTimers()).to.equal(0);
   });
 
+  describe("Bluetooth write routing", () => {
+    afterEach(() => sinon.restore());
+
+    function createBluetoothAdapterHarness(): ReturnType<
+      typeof createAdapterHarness
+    > {
+      const adapter = createAdapterHarness();
+      adapter.bluetoothConnections = new Map([["EMX12345", true]]);
+      adapter.bluetoothConnectionGenerations = new Map([["EMX12345", 1]]);
+      adapter.bluetoothConnectionErrors = new Map();
+      adapter.bluetoothPauseRestore = new Map();
+      adapter.applyBluetoothPoll = sinon.stub().resolves();
+      return adapter;
+    }
+
+    it("acknowledges a setting only after a positive reply and matching readback", async () => {
+      const adapter = createBluetoothAdapterHarness();
+      const stateId = "easee.0.EMX12345.config.isEnabled";
+      const command = sinon.stub().resolves({ id: 29, code: 1 });
+      const poll = sinon
+        .stub()
+        .resolves({ config: { isEnabled: 1 }, state: {}, values: {} });
+      adapter.bluetoothClient = { command, poll };
+
+      await adapter.handleBluetoothStateChange(stateId, {
+        val: true,
+        ack: false,
+      });
+
+      expect(
+        command.calledOnceWithExactly("EMX12345", {
+          type: "setEnabled",
+          enabled: true,
+        }),
+      ).to.equal(true);
+      expect(
+        adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
+      ).to.equal(true);
+    });
+
+    it("does not acknowledge a command rejected by the charger", async () => {
+      const adapter = createBluetoothAdapterHarness();
+      const stateId = "easee.0.EMX12345.config.isEnabled";
+      const command = sinon
+        .stub()
+        .rejects(new Error("The charger refused BLE command 29"));
+      adapter.bluetoothClient = { command, poll: sinon.stub() };
+
+      await adapter.handleBluetoothStateChange(stateId, {
+        val: true,
+        ack: false,
+      });
+
+      expect(command.calledOnce).to.equal(true);
+      expect(
+        adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
+      ).to.equal(false);
+      expect(adapter.log.error.called).to.equal(true);
+    });
+
+    it("rejects Cloud-only writes without sending or acknowledging them", async () => {
+      const adapter = createBluetoothAdapterHarness();
+      const stateId = "easee.0.EMX12345.control.start";
+      const command = sinon.stub();
+      adapter.bluetoothClient = { command, poll: sinon.stub() };
+
+      await adapter.handleBluetoothStateChange(stateId, {
+        val: true,
+        ack: false,
+      });
+
+      expect(command.called).to.equal(false);
+      expect(
+        adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
+      ).to.equal(false);
+      expect(adapter.log.error.called).to.equal(true);
+    });
+
+    it("does not send a pre-disconnect pause after the connection changes", async () => {
+      const adapter = createBluetoothAdapterHarness();
+      const stateId = "easee.0.EMX12345.control.pause";
+      const command = sinon.stub();
+      adapter.bluetoothClient = { command, poll: sinon.stub() };
+      adapter.readBluetoothPoll = sinon.stub().callsFake(() => {
+        adapter.bluetoothConnectionGenerations.set("EMX12345", 2);
+        return Promise.resolve({
+          config: {},
+          state: { dynamicChargerCurrent: 16 },
+          values: {},
+        });
+      });
+
+      await adapter.handleBluetoothStateChange(stateId, {
+        val: true,
+        ack: false,
+      });
+
+      expect(command.called).to.equal(false);
+      expect(
+        adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
+      ).to.equal(false);
+      expect(adapter.log.error.called).to.equal(true);
+    });
+  });
+
   it("aborts an in-flight session request during unload", async () => {
     const adapter = createAdapterHarness();
     const clock = sinon.useFakeTimers();
@@ -1701,110 +1921,6 @@ describe("Easee polling regressions", () => {
         });
       });
 
-    describe("Bluetooth write routing", () => {
-      afterEach(() => sinon.restore());
-
-      function createBluetoothAdapterHarness(): ReturnType<
-        typeof createAdapterHarness
-      > {
-        const adapter = createAdapterHarness();
-        adapter.bluetoothConnections = new Map([["EMX12345", true]]);
-        adapter.bluetoothConnectionGenerations = new Map([["EMX12345", 1]]);
-        adapter.bluetoothConnectionErrors = new Map();
-        adapter.bluetoothPauseRestore = new Map();
-        adapter.applyBluetoothPoll = sinon.stub().resolves();
-        return adapter;
-      }
-
-      it("acknowledges a setting only after a positive reply and matching readback", async () => {
-        const adapter = createBluetoothAdapterHarness();
-        const stateId = "easee.0.EMX12345.config.isEnabled";
-        const command = sinon.stub().resolves({ id: 29, code: 1 });
-        const poll = sinon
-          .stub()
-          .resolves({ config: { isEnabled: 1 }, state: {}, values: {} });
-        adapter.bluetoothClient = { command, poll };
-
-        await adapter.handleBluetoothStateChange(stateId, {
-          val: true,
-          ack: false,
-        });
-
-        expect(
-          command.calledOnceWithExactly("EMX12345", {
-            type: "setEnabled",
-            enabled: true,
-          }),
-        ).to.equal(true);
-        expect(
-          adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
-        ).to.equal(true);
-      });
-
-      it("does not acknowledge a command rejected by the charger", async () => {
-        const adapter = createBluetoothAdapterHarness();
-        const stateId = "easee.0.EMX12345.config.isEnabled";
-        const command = sinon
-          .stub()
-          .rejects(new Error("The charger refused BLE command 29"));
-        adapter.bluetoothClient = { command, poll: sinon.stub() };
-
-        await adapter.handleBluetoothStateChange(stateId, {
-          val: true,
-          ack: false,
-        });
-
-        expect(command.calledOnce).to.equal(true);
-        expect(
-          adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
-        ).to.equal(false);
-        expect(adapter.log.error.called).to.equal(true);
-      });
-
-      it("rejects Cloud-only writes without sending or acknowledging them", async () => {
-        const adapter = createBluetoothAdapterHarness();
-        const stateId = "easee.0.EMX12345.control.start";
-        const command = sinon.stub();
-        adapter.bluetoothClient = { command, poll: sinon.stub() };
-
-        await adapter.handleBluetoothStateChange(stateId, {
-          val: true,
-          ack: false,
-        });
-
-        expect(command.called).to.equal(false);
-        expect(
-          adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
-        ).to.equal(false);
-        expect(adapter.log.error.called).to.equal(true);
-      });
-
-      it("does not send a pre-disconnect pause after the connection changes", async () => {
-        const adapter = createBluetoothAdapterHarness();
-        const stateId = "easee.0.EMX12345.control.pause";
-        const command = sinon.stub();
-        adapter.bluetoothClient = { command, poll: sinon.stub() };
-        adapter.readBluetoothPoll = sinon.stub().callsFake(() => {
-          adapter.bluetoothConnectionGenerations.set("EMX12345", 2);
-          return Promise.resolve({
-            config: {},
-            state: { dynamicChargerCurrent: 16 },
-            values: {},
-          });
-        });
-
-        await adapter.handleBluetoothStateChange(stateId, {
-          val: true,
-          ack: false,
-        });
-
-        expect(command.called).to.equal(false);
-        expect(
-          adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
-        ).to.equal(false);
-        expect(adapter.log.error.called).to.equal(true);
-      });
-    });
     adapter.setNewSessionToCharger = sinon.stub().resolves();
 
     adapter.updateSessionChargers([{ id: "charger-a" }]);
@@ -1814,5 +1930,120 @@ describe("Easee polling regressions", () => {
     expect(requestSignal!.aborted).to.equal(true);
     await clock.tickAsync(0);
     expect(clock.countTimers()).to.equal(0);
+  });
+
+  describe("Cloud control writes", () => {
+    afterEach(() => sinon.restore());
+
+    it("does not execute acknowledged button state updates", () => {
+      const adapter = createAdapterHarness();
+      adapter.connectionMode = "cloud";
+      adapter.startCharging = sinon.stub().resolves();
+
+      adapter.onStateChange("easee.0.charger.control.start", {
+        val: true,
+        ack: true,
+      });
+
+      expect(adapter.startCharging.called).to.equal(false);
+    });
+
+    it("acknowledges a Cloud button only after the request succeeds", async () => {
+      const adapter = createAdapterHarness();
+      const stateId = "easee.0.charger.control.start";
+      adapter.startCharging = sinon.stub().resolves();
+
+      await adapter.executeCloudControlWrite(stateId, "charger", "start", true);
+
+      expect(adapter.startCharging.calledOnceWithExactly("charger")).to.equal(
+        true,
+      );
+      expect(
+        adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
+      ).to.equal(true);
+    });
+
+    it("does not acknowledge or send a failed Cloud command", async () => {
+      const adapter = createAdapterHarness();
+      const stateId = "easee.0.charger.control.start";
+      adapter.startCharging = sinon.stub().rejects(new Error("request failed"));
+
+      await adapter.executeCloudControlWrite(stateId, "charger", "start", true);
+
+      expect(
+        adapter.setStateAsync.calledWith(stateId, { val: true, ack: true }),
+      ).to.equal(false);
+      expect(adapter.log.error.called).to.equal(true);
+    });
+
+    it("ignores false button writes", async () => {
+      const adapter = createAdapterHarness();
+      adapter.startCharging = sinon.stub().resolves();
+
+      await adapter.executeCloudControlWrite(
+        "easee.0.charger.control.start",
+        "charger",
+        "start",
+        false,
+      );
+
+      expect(adapter.startCharging.called).to.equal(false);
+      expect(adapter.setStateAsync.called).to.equal(false);
+    });
+  });
+
+  describe("External object ID validation", () => {
+    it("ignores SignalR updates that could create unsafe object paths", () => {
+      const adapter = createAdapterHarness();
+
+      adapter.handleSignalRProductUpdate({
+        id: 103,
+        mid: "../outside",
+        dataType: 2,
+        value: true,
+      });
+
+      expect(adapter.setStateAsync.called).to.equal(false);
+      expect(adapter.log.warn.calledOnce).to.equal(true);
+    });
+
+    it("does not create Cloud objects from charger IDs containing path separators", async () => {
+      const adapter = createAdapterHarness();
+      const clock = sinon.useFakeTimers();
+      const updateSessionChargers = sinon.stub();
+      adapter.refreshToken = sinon.stub().resolves();
+      adapter.getAllCharger = sinon
+        .stub()
+        .resolves([{ id: "../outside", name: "Unexpected" }]);
+      adapter.updateSessionChargers = updateSessionChargers;
+      adapter.setAllStatusObjects = sinon.stub().resolves();
+      adapter.setAllConfigObjects = sinon.stub().resolves();
+
+      await adapter.readAllStates();
+
+      expect(updateSessionChargers.called).to.equal(false);
+      expect(adapter.setAllStatusObjects.called).to.equal(false);
+      expect(adapter.setAllConfigObjects.called).to.equal(false);
+      adapter.onUnload(() => {});
+      await clock.tickAsync(0);
+    });
+
+    it("does not create session objects from invalid calendar values", async () => {
+      const adapter = createAdapterHarness();
+      const setObjectNotExistsAsync = sinon.stub().resolves();
+      adapter.setObjectNotExistsAsync = setObjectNotExistsAsync;
+
+      await adapter.setNewSessionToCharger({ id: "charger" }, [
+        {
+          year: 2026,
+          month: 13,
+          totalEnergyUsage: 10,
+          totalCost: 2,
+        },
+      ]);
+
+      expect(setObjectNotExistsAsync.called).to.equal(false);
+      expect(adapter.log.warn.calledOnce).to.equal(true);
+    });
   });
 });

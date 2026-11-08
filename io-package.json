@@ -109,17 +109,17 @@
       "zh-cn": "Easee Wallbox API"
     },
     "desc": {
-      "en": "Communicates with the Easee Wallbox API",
-      "de": "Kommuniziert mit der Easee Wallbox API",
-      "ru": "Взаимодействует с API Easee Wallbox",
-      "pt": "Comunica-se com a API Easee Wallbox",
-      "nl": "Communiceert met de Easee Wallbox API",
-      "fr": "Communique avec l'API Easee Wallbox",
-      "it": "Comunica con l'API Easee Wallbox",
-      "es": "Se comunica con la API Easee Wallbox",
-      "pl": "Komunikuje się z API Easee Wallbox",
-      "uk": "Зв’язується з Easee Wallbox API",
-      "zh-cn": "与 Easee Wallbox API 通信"
+      "en": "Communicates with Easee wallboxes via the Easee Cloud API or local Bluetooth",
+      "de": "Kommuniziert mit Easee-Wallboxen über die Easee-Cloud-API oder lokales Bluetooth",
+      "ru": "Связь с зарядными устройствами Easee через облачный API Easee или локальный Bluetooth",
+      "pt": "Comunica com carregadores Easee pela API na nuvem da Easee ou por Bluetooth local",
+      "nl": "Communiceert met Easee-wallboxen via de Easee Cloud API of lokale Bluetooth",
+      "fr": "Communique avec les bornes Easee via l’API Easee Cloud ou le Bluetooth local",
+      "it": "Comunica con le wallbox Easee tramite l’API Easee Cloud o Bluetooth locale",
+      "es": "Se comunica con cargadores Easee mediante la API de Easee Cloud o Bluetooth local",
+      "pl": "Komunikuje się z ładowarkami Easee przez API Easee Cloud lub lokalny Bluetooth",
+      "uk": "Зв’язується із зарядними пристроями Easee через хмарний API Easee або локальний Bluetooth",
+      "zh-cn": "通过 Easee Cloud API 或本地蓝牙与 Easee 充电桩通信"
     },
     "authors": [
       "iobroker-community-adapters <iobroker-community-adapters@gmx.de>"
