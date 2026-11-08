@@ -11,6 +11,9 @@ interface SignalRHttpClientLike {
   request: typeof axios.request;
 }
 
+const defaultRequestTimeoutMs = 30_000;
+const maxTimeoutMilliseconds = 2_147_483_647;
+
 function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some(
     (headerName) => headerName.toLowerCase() === name.toLowerCase(),
@@ -36,6 +39,12 @@ class AxiosSignalRHttpClient extends signalR.HttpClient {
     if (cookie && !hasHeader(headers, "cookie")) {
       headers.Cookie = cookie;
     }
+    const timeout =
+      typeof request.timeout === "number" &&
+      Number.isFinite(request.timeout) &&
+      request.timeout > 0
+        ? Math.min(request.timeout, maxTimeoutMilliseconds)
+        : defaultRequestTimeoutMs;
     const cancelSource = axios.CancelToken.source();
     const abortHandler = (): void => {
       cancelSource.cancel("SignalR HTTP request aborted");
@@ -49,7 +58,7 @@ class AxiosSignalRHttpClient extends signalR.HttpClient {
         url: request.url,
         headers,
         data: request.content,
-        timeout: request.timeout,
+        timeout,
         cancelToken: cancelSource.token,
         responseType:
           request.responseType === "arraybuffer" ? "arraybuffer" : "text",

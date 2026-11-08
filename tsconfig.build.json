@@ -1,0 +1,19 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "noEmitOnError": true,
+        "rootDir": ".",
+        "outDir": "./build",
+        "rewriteRelativeImportExtensions": true
+    },
+    "include": [
+        "main.ts",
+        "lib/**/*.ts"
+    ],
+    "exclude": [
+        "**/build",
+        "node_modules/",
+        "admin/"
+    ]
+}

@@ -78,6 +78,15 @@ export function parseBluetoothChargerSettings(
     throw new Error("Bluetooth charger settings must be an object");
   }
 
+  const configuredChargers = value.bluetoothChargerList;
+  if (
+    configuredChargers !== undefined &&
+    configuredChargers !== null &&
+    (!Array.isArray(configuredChargers) || configuredChargers.length > 0)
+  ) {
+    return parseBluetoothChargers(configuredChargers);
+  }
+
   const formEntries: Record<string, string>[] = [];
   for (let index = 1; index <= 10; index++) {
     const serialNumber = value[`bluetoothCharger${index}SerialNumber`];
@@ -100,5 +109,24 @@ export function parseBluetoothChargerSettings(
     return parseBluetoothChargers(formEntries);
   }
 
-  return parseBluetoothChargers(value.bluetoothChargers);
+  const legacyChargers = value.bluetoothChargers;
+  if (
+    legacyChargers === undefined ||
+    legacyChargers === null ||
+    legacyChargers === ""
+  ) {
+    return [];
+  }
+  if (typeof legacyChargers === "string") {
+    try {
+      const entries: unknown = JSON.parse(legacyChargers);
+      if (Array.isArray(entries) && entries.length === 0) {
+        return [];
+      }
+    } catch {
+      throw new Error("Bluetooth charger configuration must be valid JSON");
+    }
+  }
+
+  return parseBluetoothChargers(legacyChargers);
 }

@@ -2,10 +2,10 @@
 
 Bluetooth mode connects the adapter directly to configured Easee chargers. It
 does not log in to Easee Cloud, fall back to Cloud, or fetch charger/site
-inventories. Configure each charger by its serial number and Bluetooth PIN in
-the adapter settings. The optional name is a local ioBroker label; it does not
-rename the charger. The PIN list is stored in an encrypted and protected native
-configuration string.
+inventories. Add and remove chargers in the ioBroker Device Manager using each
+charger's serial number and Bluetooth PIN. The optional name is a local
+ioBroker label; it does not rename the charger. PINs are encrypted in the
+protected native configuration.
 
 The Bluetooth protocol is unofficial and reverse-engineered. This adapter uses
 the field and command descriptions in
@@ -20,13 +20,14 @@ compatibility remains unknown.
 ## Setup
 
 1. Select **Bluetooth (local)** as the connection mode.
-2. Fill in one **Bluetooth charger** section per charger. Enter its serial
+2. Open the **ioBroker Device Manager** and add a charger. Enter its serial
    number and Bluetooth PIN; the local name is optional and does not rename the
    charger. The PIN is the charger PIN, not the Easee account password. The
-   serial number can be found on the charger and in the Easee app. The settings
-   provide fields for up to ten chargers, and each PIN is stored as a protected,
-   encrypted native string. Do not include the PIN in logs or support
-   diagnostics.
+   serial number can be found on the charger and in the Easee app. PINs are
+   encrypted and protected in the adapter configuration. Use the manager to
+   edit or remove configured chargers. Do not include a PIN in logs or support
+   diagnostics. Restart the adapter after changing the managed charger list;
+   this applies additions, edits, and removals to the live Bluetooth client.
 3. Make the charger discoverable. Easee documents a long press of at least five
    seconds to open a ten-minute Bluetooth window; Bluetooth can also be set to
    always-on in the Easee app. The charger may stop advertising between windows.
@@ -35,12 +36,102 @@ compatibility remains unknown.
    failure can mean that another phone, app, or adapter is using that slot; it
    is not proof of that cause.
 
+Existing installations with the former numbered Bluetooth fields or JSON
+charger setting continue to be read until those entries are edited in the
+Device Manager. When saving a charger through the manager, its PIN is stored
+encrypted in the new configuration format; existing entries remain usable
+without re-entering their PINs.
+
 The Easee support article documents Bluetooth access for three-phase chargers
 with firmware 316 or newer and Easee One with firmware 60 or newer. These are
 Easee's published prerequisites, not a hardware test of this adapter.
 See [Easee: Using Bluetooth](https://support.easee.com/hc/en-gb/articles/19270172294161-Using-Bluetooth),
 [Easee: Bluetooth in the Installer App](https://support.easee.com/hc/en-gb/articles/19160690698513-Bluetooth-in-the-Installer-App)
 and [Easee: find or recover the PIN](https://support.easee.com/hc/en-gb/articles/4856383404177-Easee-charger-PIN-code-find-or-recover-the-PIN).
+
+On Linux with the BlueZ D-Bus binding, if a GATT write reports an
+authentication/insufficient-authentication error, the adapter requests
+`org.bluez.Device1.Pair()` once for that connection and retries the affected
+write once. Pairing is not requested proactively, is not attempted for other
+write errors, and is not available on other Noble bindings. The automatic
+pairing request and write retry are allowed only when that candidate's
+advertised local name exactly matches its configured charger serial. A local
+name is only a discovery hint, not cryptographic identity; the authenticated
+J-PAKE exchange and serial reads remain necessary to verify the charger. The
+BlueZ pairing operation is bounded to 30 seconds; failures and timeouts are
+reported as connection errors. The configured Easee PIN is used by the Easee
+protocol and is not sent to BlueZ as a Bluetooth pairing passkey. The host's
+BlueZ system bus access and pairing policy must permit the request;
+pairing-agent or security-policy requirements need to be handled on the host.
+
+## Adapter status and manual search
+
+In Bluetooth mode, the settings page reports Noble's current local adapter
+state (`poweredOn`, `poweredOff`, `unauthorized`, `unsupported`, `unknown`, or
+`resetting`) and a separate Bluetooth search readiness message in
+`info.bluetoothSearchReadiness`. Readiness distinguishes transport startup,
+initial charger connection, active scan/poll/write/reconnect, pending or active
+dynamic-current updates, local adapter unavailability, and when a manual search
+can start. `Ready to search` means
+the local adapter reports `poweredOn`, the BLE transport is initialized, and no
+tracked operation currently blocks the scan; it does not establish that any
+charger is nearby, advertising, authenticated, or connected. Access restrictions
+can also prevent scanning even when a controller state is reported. Info logs
+record local adapter-state transitions, configured charger count (not PINs),
+connection stages, and manual scan start and duration. Scan failures are logged
+as warnings. The manual diagnostic scan asks Noble for all advertisements and
+then locally accepts only those advertising the Easee service UUID. For a scan
+with no matches, logs and `info.bluetoothScanResults` include the number of
+advertisements Noble reported and up to 20 distinct observed
+name/connectability/service-UUID combinations; unnamed devices and absent
+service UUIDs are reported explicitly. This can help distinguish no
+advertisements delivered to
+Noble from devices whose advertisements do not contain the Easee UUID or are
+not currently connectable. The diagnostic summary is bounded and contains no
+peripheral addresses. Matching results additionally show Noble's peripheral
+identifier and reported connectability, when available. Connection errors are
+PIN-redacted before logging. Noble's Linux D-Bus binding currently assumes
+advertisements are connectable, so the adapter reports connectability as unknown
+for that backend rather than treating Noble's value as hardware evidence.
+Scans blocked by an initial connection attempt, poll, write, pending or active
+Dynamic circuit current update, reconnection, or other search are reported at
+info level with the individual busy flags, and the blocking operation is
+written to `info.bluetoothScanResults`. An established idle charger connection
+alone does not block a diagnostic advertisement scan.
+
+Use **Search for Easee BLE devices** to run one unfiltered advertisement scan
+for up to 30 seconds. Newly observed name/connectability/service-UUID
+combinations appear in `info.bluetoothScanResults` while the scan runs. At
+completion, advertisements containing the Easee service UUID are listed as
+matches with Noble's observed peripheral identifier and connectability; that
+identifier is not asserted to be the charger's serial number. Other
+advertisements remain diagnostic observations and are not classified as Easee
+matches. Search results are informational and are never added to
+configuration. Add a charger explicitly through the ioBroker Device Manager,
+where its serial number and PIN are entered and protected.
+
+For automatic connection discovery, the adapter also considers a peripheral
+whose broadcast local name exactly matches a configured charger's serial
+number, even if the advertisement omits the Easee service UUID. Candidates
+known to be non-connectable are reported and skipped; candidates whose
+connectability is unknown (including the default Linux D-Bus backend) are still
+attempted. The name is only a discovery hint: connection setup still requires the expected
+Easee GATT service and characteristics before authentication and use. A
+matching name alone does not prove the device's identity or availability.
+
+A scan can return no matches when a charger is off, outside Bluetooth range,
+not currently advertising, or otherwise unavailable; no match does not prove
+that Bluetooth is disabled at the charger. If `NOBLE_BINDINGS=hci` selects
+raw HCI on Linux, it may conflict with BlueZ or another scanner such as
+`bluetoothctl`; do not run a second scan at the same time. Searches are refused
+as busy during an initial connection attempt, poll, or reconnection, or while a
+Bluetooth write or Dynamic circuit current update is pending or active.
+Scheduled polling/reconnection is held while the bounded scan runs, and writes
+arriving during a search are rejected for retry rather than sent concurrently. A
+simultaneous second search is rejected as busy, not queued. Stopping the adapter
+cancels the scan and closes its Bluetooth resources. The Cloud mode never opens
+the BLE scanner. No real charger or platform hardware test has been performed
+for this search feature.
 
 ## Platform requirements
 
@@ -51,16 +142,19 @@ Linux, Windows, and Docker, but their setup differs by operating system. This
 repository's dependency installation succeeded on Node 22.23.2 on macOS; this
 is not a BLE hardware test, nor does it verify Node 22.19 on every platform.
 
-On Linux, Noble's default binding uses raw HCI access. Noble documents Linux
-kernel 3.6 or newer, `libbluetooth-dev`, a powered Bluetooth LE controller, and
-`CAP_NET_RAW` for the Node.js process. Its upstream setup guide describes
-granting this capability to the Node.js binary; note that this affects every
-process using that binary. Prefer a service-scoped capability where the host
-service manager supports it, and verify permissions for the actual adapter
-user. Raw HCI accesses the controller directly and can conflict with BlueZ or
-other Bluetooth clients. Noble also provides a separate BlueZ D-Bus binding,
-which requires `dbus-next`; this adapter does not assume that binding is
-configured.
+On Linux, the adapter selects Noble's BlueZ D-Bus binding by default. It uses
+the host BlueZ service and is intended to coexist with other Bluetooth clients.
+The `dbus-next` runtime dependency is included. Set `NOBLE_BINDINGS=hci` to
+explicitly select raw HCI, or `NOBLE_BINDINGS=dbus` to explicitly select BlueZ
+D-Bus; other supported Noble binding overrides are also preserved. Raw HCI
+requires a powered Bluetooth LE controller and `CAP_NET_RAW` for the Node.js
+process, and may conflict with BlueZ or another scanner. Noble's HCI setup guide
+describes granting this capability to the Node.js binary; note that this
+affects every process using that binary. Prefer a service-scoped capability
+where the host service manager supports it, and verify permissions for the
+actual adapter user. The D-Bus binding requires the system BlueZ service and
+access to the system bus. Neither binding has been hardware-tested with this
+adapter.
 
 On macOS, the native binding requires the platform's native build tools and
 Bluetooth permission for the process running ioBroker. On Windows, Noble
@@ -68,15 +162,16 @@ documents native Windows support; native build requirements and Bluetooth
 permissions still apply. Neither operating system has been hardware-tested
 with this adapter.
 
-For Docker on Linux, Noble documents `--network=host`. The default raw HCI
-binding also needs the host controller to be visible in the container's
-network namespace and `CAP_NET_RAW` (for example, Docker's `--cap-add=NET_RAW`).
-These settings are not sufficient on every host or Docker configuration and
-have not been tested with ioBroker images here. The optional HCI user-channel
-mode has additional `CAP_NET_ADMIN` requirements and is not assumed. Do not
-grant `--privileged` or expose a D-Bus socket unless the chosen binding
-requires it; there is no one-size-fits-all Docker recipe verified by this
-project.
+For Docker on Linux, the default D-Bus binding needs access to the host system
+bus and BlueZ service (often through `/run/dbus/system_bus_socket`); exposing
+that socket grants access to host D-Bus interfaces and must be scoped carefully.
+If `NOBLE_BINDINGS=hci` is selected instead, Noble documents `--network=host`, a
+visible host controller, and `CAP_NET_RAW` (for example,
+Docker's `--cap-add=NET_RAW`). These settings are not sufficient on every host
+or Docker configuration and have not been tested with ioBroker images here.
+The optional HCI user-channel mode has additional `CAP_NET_ADMIN` requirements
+and is not assumed. Do not grant `--privileged`; there is no one-size-fits-all
+Docker recipe verified by this project.
 
 ## Existing datapoint mapping
 

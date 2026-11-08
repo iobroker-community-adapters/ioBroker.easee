@@ -18,6 +18,7 @@ interface ModuleLoader {
 
 const moduleLoader = Module as unknown as ModuleLoader;
 const originalLoad = moduleLoader._load;
+let nobleScannerFactoryOverride: (() => Promise<unknown>) | undefined;
 moduleLoader._load = function (
   request: string,
   parent: NodeModule | undefined,
@@ -26,7 +27,22 @@ moduleLoader._load = function (
   if (request === "@iobroker/adapter-core") {
     return { Adapter: class {} };
   }
-  return originalLoad.call(this, request, parent, isMain);
+  const loaded = originalLoad.call(this, request, parent, isMain);
+  if (
+    request === "./lib/noble-bluetooth-transport.ts" &&
+    parent?.filename.endsWith("/main.ts")
+  ) {
+    const transport = loaded as {
+      createNobleBluetoothScanner: () => Promise<unknown>;
+    };
+    return {
+      ...transport,
+      createNobleBluetoothScanner: () =>
+        nobleScannerFactoryOverride?.() ??
+        transport.createNobleBluetoothScanner(),
+    };
+  }
+  return loaded;
 };
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const createAdapter = require("./main.ts");
@@ -48,6 +64,7 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
     }
   };
   adapter.setStateAsync = sinon.stub().resolves();
+  adapter.getStateAsync = sinon.stub().resolves(null);
   adapter.apiRetryState = new Map();
   adapter.pendingSiteConfigRetries = new Map();
   adapter.unloading = false;
@@ -91,22 +108,167 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
         _description: string,
         update: (site: {
           id: string;
-          circuits: { id: string }[];
+          circuits: { id: string; chargers: { id: string }[] }[];
         }) => Promise<void>,
       ) =>
         update({
           id: `site-${chargerId}`,
-          circuits: [{ id: `circuit-${chargerId}` }],
+          circuits: [
+            {
+              id: `circuit-${chargerId}`,
+              chargers: [{ id: chargerId }],
+            },
+          ],
         }),
     );
   adapter.getChargerSite = sinon.stub().callsFake((chargerId: string) =>
     Promise.resolve({
       id: `site-${chargerId}`,
-      circuits: [{ id: `circuit-${chargerId}` }],
+      circuits: [
+        {
+          id: `circuit-${chargerId}`,
+          chargers: [{ id: chargerId }],
+        },
+      ],
     }),
   );
   return adapter;
 }
+
+function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
+  const adapter = createAdapterHarness();
+  adapter.connectionMode = "bluetooth";
+  adapter.bluetoothChargers = [
+    { serialNumber: "EMX12345", pin: "1234", name: "Garage charger" },
+  ];
+  adapter.bluetoothClient = null;
+  adapter.bluetoothScanner = null;
+  adapter.bluetoothAdapterStateWrite = Promise.resolve();
+  adapter.bluetoothConnections = new Map();
+  adapter.bluetoothConnectionErrors = new Map();
+  adapter.bluetoothConnectionGenerations = new Map();
+  adapter.getConfiguredBluetoothChargers = sinon
+    .stub()
+    .returns(adapter.bluetoothChargers);
+  adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+  adapter.setAllStatusObjects = sinon.stub().resolves();
+  adapter.setAllConfigObjects = sinon.stub().resolves();
+  adapter.setBluetoothInfoObjects = sinon.stub().resolves();
+  adapter.configurePollInterval = sinon.stub();
+  adapter.updateBluetoothSearchReadiness = sinon.stub().resolves();
+  adapter.scheduleBluetoothPoll = sinon.stub();
+  adapter.scheduleBluetoothReconnect = sinon.stub();
+  return adapter;
+}
+
+describe("Bluetooth startup shutdown races", () => {
+  afterEach(() => {
+    nobleScannerFactoryOverride = undefined;
+    sinon.restore();
+  });
+
+  it("closes a scanner created after unload without starting the Bluetooth client", async () => {
+    const adapter = createBluetoothStartupHarness();
+    const scanner = {
+      close: sinon.stub().resolves(),
+      getAdapterState: sinon.stub().returns("poweredOn"),
+      onAdapterStateChange: sinon.stub().returns(sinon.stub()),
+    };
+    let resolveScanner!: (value: unknown) => void;
+    let notifyFactoryCall!: () => void;
+    const factoryCalled = new Promise<void>((resolve) => {
+      notifyFactoryCall = resolve;
+    });
+    nobleScannerFactoryOverride = () => {
+      notifyFactoryCall();
+      return new Promise((resolve) => {
+        resolveScanner = resolve;
+      });
+    };
+
+    const startup = adapter.startBluetooth();
+    await factoryCalled;
+    adapter.unloading = true;
+    resolveScanner(scanner);
+    await startup;
+
+    expect(scanner.close.calledOnce).to.equal(true);
+    expect(scanner.onAdapterStateChange.called).to.equal(false);
+    expect(adapter.bluetoothScanner).to.equal(null);
+    expect(adapter.bluetoothClient).to.equal(null);
+    expect(adapter.configurePollInterval.called).to.equal(false);
+  });
+
+  it("stops initialization when unload begins during adapter status update", async () => {
+    const adapter = createBluetoothStartupHarness();
+    const scanner = {
+      close: sinon.stub().resolves(),
+      discover: sinon.stub().resolves([]),
+      getAdapterState: sinon.stub().returns("poweredOn"),
+      onAdapterStateChange: sinon.stub().returns(sinon.stub()),
+      connect: sinon.stub(),
+    };
+    let releaseStatusWrite!: () => void;
+    let notifyStatusWrite!: () => void;
+    const statusWriteStarted = new Promise<void>((resolve) => {
+      notifyStatusWrite = resolve;
+    });
+    adapter.setStateAsync = sinon
+      .stub()
+      .callsFake((id: string, value: unknown) => {
+        if (id === "info.bluetoothAdapterState" && value === "poweredOn") {
+          notifyStatusWrite();
+          return new Promise<void>((resolve) => {
+            releaseStatusWrite = resolve;
+          });
+        }
+        return Promise.resolve();
+      });
+    nobleScannerFactoryOverride = () => Promise.resolve(scanner);
+
+    const startup = adapter.startBluetooth();
+    await statusWriteStarted;
+    adapter.unloading = true;
+    releaseStatusWrite();
+    await startup;
+
+    expect(adapter.bluetoothClient).to.equal(null);
+    expect(adapter.configurePollInterval.called).to.equal(false);
+    expect(scanner.discover.called).to.equal(false);
+    await scanner.close();
+  });
+});
+
+describe("Bluetooth reconnect backoff", () => {
+  afterEach(() => sinon.restore());
+
+  it("only increases backoff after an actual reconnect attempt", async () => {
+    const adapter = createAdapterHarness();
+    const clock = sinon.useFakeTimers();
+    const reconnect = sinon.stub().resolves();
+    adapter.bluetoothStartupComplete = true;
+    adapter.bluetoothClient = { reconnect };
+    adapter.bluetoothConnections = new Map([["EHLUTXLE", false]]);
+    adapter.bluetoothReconnectDelay = 10000;
+    adapter.bluetoothReconnectTimer = null;
+    adapter.bluetoothReconnectInFlight = false;
+    adapter.bluetoothManualScanInFlight = false;
+    adapter.updateBluetoothSearchReadiness = sinon.stub().resolves();
+
+    adapter.scheduleBluetoothReconnect();
+    expect(adapter.bluetoothReconnectDelay).to.equal(10000);
+
+    adapter.clearTimeout(adapter.bluetoothReconnectTimer);
+    adapter.bluetoothReconnectTimer = null;
+    expect(adapter.bluetoothReconnectDelay).to.equal(10000);
+
+    adapter.scheduleBluetoothReconnect();
+    await clock.tickAsync(10000);
+
+    expect(reconnect.calledOnce).to.equal(true);
+    expect(adapter.bluetoothReconnectDelay).to.equal(20000);
+  });
+});
 
 describe("Charger name updates", () => {
   afterEach(() => sinon.restore());
@@ -413,7 +575,11 @@ describe("Easee polling regressions", () => {
     adapter.changeCircuitConfig = changeCircuitConfig;
     const getChargerSite = adapter.getChargerSite;
     let resolveRetrySite:
-      ((site: { id: string; circuits: { id: string }[] }) => void) | undefined;
+      | ((site: {
+          id: string;
+          circuits: { id: string; chargers: { id: string }[] }[];
+        }) => void)
+      | undefined;
     getChargerSite.onFirstCall().callsFake(() => {
       adapter.apiRetryState.set("charger site charger", {
         retryAt: Date.now() + 30000,
@@ -424,7 +590,10 @@ describe("Easee polling regressions", () => {
       throw error;
     });
     getChargerSite.onSecondCall().returns(
-      new Promise<{ id: string; circuits: { id: string }[] }>((resolve) => {
+      new Promise<{
+        id: string;
+        circuits: { id: string; chargers: { id: string }[] }[];
+      }>((resolve) => {
         resolveRetrySite = resolve;
       }),
     );
@@ -444,7 +613,12 @@ describe("Easee polling regressions", () => {
     expect(getChargerSite.callCount).to.equal(2);
     resolveRetrySite!({
       id: "site-charger",
-      circuits: [{ id: "circuit-charger" }],
+      circuits: [
+        {
+          id: "circuit-charger",
+          chargers: [{ id: "charger" }],
+        },
+      ],
     });
     await clock.tickAsync(500);
     expect(changeCircuitConfig.callCount).to.equal(1);
@@ -463,7 +637,12 @@ describe("Easee polling regressions", () => {
     adapter.getChargerSite.callsFake(() =>
       Promise.resolve({
         id: "shared-site",
-        circuits: [{ id: "shared-circuit" }],
+        circuits: [
+          {
+            id: "shared-circuit",
+            chargers: [{ id: "chargerA" }, { id: "chargerB" }],
+          },
+        ],
       }),
     );
 
@@ -530,7 +709,12 @@ describe("Easee polling regressions", () => {
     adapter.getChargerSite.callsFake(() =>
       Promise.resolve({
         id: "shared-site",
-        circuits: [{ id: "shared-circuit" }],
+        circuits: [
+          {
+            id: "shared-circuit",
+            chargers: [{ id: "chargerA" }, { id: "chargerB" }],
+          },
+        ],
       }),
     );
 
@@ -549,6 +733,7 @@ describe("Easee polling regressions", () => {
       changeMaxCircuitConfig.calledOnceWithExactly(
         "shared-site",
         "shared-circuit",
+        "p1",
         6,
       ),
     ).to.equal(true);

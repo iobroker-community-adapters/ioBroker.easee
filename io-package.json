@@ -1,6 +1,10 @@
 {
   "common": {
     "name": "easee",
+    "supportedMessages": {
+      "custom": true,
+      "deviceManager": true
+    },
     "version": "3.2.0",
     "news": {
       "3.2.0": {
@@ -161,6 +165,7 @@
   "protectedNative": [
     "client_secret",
     "bluetoothChargers",
+    "bluetoothChargerList",
     "bluetoothCharger1Pin",
     "bluetoothCharger2Pin",
     "bluetoothCharger3Pin",
@@ -196,6 +201,8 @@
     "signalR": false,
     "logtype": false,
     "bluetoothChargers": "[]",
+    "bluetoothChargerList": [],
+    "bluetoothChargerListManaged": false,
     "bluetoothCharger1SerialNumber": "",
     "bluetoothCharger1Pin": "",
     "bluetoothCharger1Name": "",

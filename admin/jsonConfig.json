@@ -18,8 +18,14 @@
             "lg": 4,
             "xl": 4,
             "options": [
-                { "label": "Easee Cloud", "value": "cloud" },
-                { "label": "Bluetooth (local)", "value": "bluetooth" }
+                {
+                    "label": "Easee Cloud",
+                    "value": "cloud"
+                },
+                {
+                    "label": "Bluetooth (local)",
+                    "value": "bluetooth"
+                }
             ],
             "default": "cloud",
             "label": "Connection mode"
@@ -29,377 +35,69 @@
             "type": "infoBox",
             "boxType": "info",
             "closeable": false,
-            "text": "Bluetooth mode requires a compatible Bluetooth LE adapter and platform-specific permissions. Enter each charger in the fields below (up to 10); each PIN is encrypted. See the Bluetooth guide for setup and limitations.",
+            "text": "Bluetooth mode requires a compatible Bluetooth LE adapter and platform-specific permissions. Add or remove chargers in the ioBroker Device Manager. PINs are encrypted in the adapter configuration. See the Bluetooth guide for setup and limitations.",
             "hidden": "data.connectionMode !== 'bluetooth'"
         },
-        "_bluetoothCharger1": {
+        "_bluetoothAdapterStatus": {
             "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 1",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger1SerialNumber": {
-            "type": "text",
+            "type": "state",
+            "oid": "info.bluetoothAdapterState",
+            "control": "text",
             "xs": 12,
             "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
+            "md": 8,
+            "lg": 6,
+            "xl": 6,
+            "label": "Local Bluetooth adapter state",
+            "help": "This reports only the local adapter state. poweredOn means the adapter reports ready, but access restrictions can still prevent a scan; it does not mean a charger is nearby, discoverable, authenticated, or connected.",
             "hidden": "data.connectionMode !== 'bluetooth'"
         },
-        "bluetoothCharger1Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger1Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger2": {
+        "_bluetoothSearchReadiness": {
             "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 2",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger2SerialNumber": {
-            "type": "text",
+            "type": "state",
+            "oid": "info.bluetoothSearchReadiness",
+            "control": "text",
             "xs": 12,
             "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
+            "md": 8,
+            "lg": 6,
+            "xl": 6,
+            "label": "Bluetooth search readiness",
+            "help": "Shows whether a manual search can start. Ready refers only to the local adapter and available BLE transport; it does not confirm that a charger is nearby or advertising.",
             "hidden": "data.connectionMode !== 'bluetooth'"
         },
-        "bluetoothCharger2Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger2Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger3": {
+        "_bluetoothManualSearch": {
             "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 3",
+            "type": "sendTo",
+            "command": "bluetoothScan",
+            "icon": "search",
+            "showProcess": false,
+            "timeout": 45000,
+            "variant": "contained",
+            "label": "Search for Easee BLE devices",
+            "result": {
+                "completed": "Search completed"
+            },
+            "error": {
+                "unavailable": "Bluetooth search is available only in Bluetooth mode.",
+                "notReady": "The local Bluetooth adapter is not ready.",
+                "busy": "Bluetooth is busy with connection, polling, or a write operation; try again shortly.",
+                "failed": "Bluetooth search failed. Check adapter access and logs."
+            },
             "hidden": "data.connectionMode !== 'bluetooth'"
         },
-        "bluetoothCharger3SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger3Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger3Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger4": {
+        "_bluetoothScanResults": {
             "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 4",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger4SerialNumber": {
-            "type": "text",
+            "type": "state",
+            "oid": "info.bluetoothScanResults",
+            "control": "text",
             "xs": 12,
             "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger4Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger4Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger5": {
-            "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 5",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger5SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger5Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger5Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger6": {
-            "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 6",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger6SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger6Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger6Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger7": {
-            "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 7",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger7SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger7Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger7Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger8": {
-            "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 8",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger8SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger8Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger8Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger9": {
-            "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 9",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger9SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger9Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger9Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothCharger10": {
-            "newLine": true,
-            "type": "header",
-            "size": 3,
-            "text": "Bluetooth charger 10",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger10SerialNumber": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Serial number",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger10Pin": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Bluetooth PIN",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothCharger10Name": {
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 4,
-            "lg": 4,
-            "xl": 4,
-            "label": "Charger name (optional)",
+            "md": 12,
+            "lg": 12,
+            "xl": 12,
+            "label": "Bluetooth search results",
+            "help": "Search results are informational only and are never added to the Device Manager automatically.",
             "hidden": "data.connectionMode !== 'bluetooth'"
         },
         "username": {
@@ -460,8 +158,14 @@
             "lg": 4,
             "xl": 4,
             "options": [
-                { "label": "Automatic", "value": "auto" },
-                { "label": "Manual", "value": "manual" }
+                {
+                    "label": "Automatic",
+                    "value": "auto"
+                },
+                {
+                    "label": "Manual",
+                    "value": "manual"
+                }
             ],
             "default": "auto",
             "label": "Session polling mode",
@@ -530,7 +234,9 @@
             "boxType": "warning",
             "closeable": false,
             "text": "The configured interval is below the recommendation and will be clamped.",
-            "dependsOnStates": { "chargerCount": ".info.sessionPollChargerCount" },
+            "dependsOnStates": {
+                "chargerCount": ".info.sessionPollChargerCount"
+            },
             "hidden": "data.connectionMode !== 'cloud' || data.sessionPollMode !== 'manual' || !_states.chargerCount?.val || data.sessionPollInterval >= _states.chargerCount.val * 7"
         },
         "signalR": {

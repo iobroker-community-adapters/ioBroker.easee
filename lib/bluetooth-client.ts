@@ -1,6 +1,5 @@
 import {
   BLUETOOTH_SERVICE_UUID,
-  BluetoothAuthenticationError,
   BluetoothHandshake,
   BluetoothProtocolError,
   assertBluetoothCommandAccepted,
@@ -62,17 +61,19 @@ interface PendingNotification {
   readonly channel: BluetoothChannel;
   readonly resolve: (data: Buffer) => void;
   readonly reject: (error: Error) => void;
-  readonly timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 interface DeviceConnection {
   readonly config: BluetoothDeviceConfig;
   readonly candidateId: string;
+  readonly pairingAllowed: boolean;
   readonly link: BluetoothLink;
   key: Buffer;
   connected: boolean;
   closed: boolean;
   pending?: PendingNotification;
+  pairAttempted: boolean;
   operationTail: Promise<void>;
 }
 
@@ -85,6 +86,24 @@ const CHANNELS: readonly BluetoothChannel[] = [
 
 function errorFrom(value: unknown): Error {
   return value instanceof Error ? value : new Error("BLE operation failed");
+}
+
+function isAuthenticationWriteError(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return typeof value === "string" && isAuthenticationErrorText(value);
+  }
+  const error = value as Record<string, unknown>;
+  return isAuthenticationErrorText(
+    [error.message, error.name, error.type, error.code, error.text]
+      .filter((part) => typeof part === "string" || typeof part === "number")
+      .join(" "),
+  );
+}
+
+function isAuthenticationErrorText(text: string): boolean {
+  return /insufficient[\s_-]*auth(?:entication)?|authentication(?:\s+(?:required|failed))?|not[\s_.-]*paired|not[\s_.-]*authorized|(?:att|gatt)(?:\s+error)?[^\n]{0,32}0x0?5\b/i.test(
+    text,
+  );
 }
 
 export class BluetoothClient {
@@ -162,6 +181,12 @@ export class BluetoothClient {
     }
     this.stopping = true;
     this.started = false;
+    const scannerClose = Promise.resolve()
+      .then(() => this.scanner.close())
+      .then(
+        () => ({ error: undefined }),
+        (error: unknown) => ({ error }),
+      );
     this.stopTask = (async () => {
       try {
         await this.startTask?.catch(() => undefined);
@@ -172,7 +197,10 @@ export class BluetoothClient {
         await Promise.all(
           current.map((connection) => this.closeConnection(connection)),
         );
-        await this.scanner.close();
+        const { error } = await scannerClose;
+        if (error !== undefined) {
+          throw errorFrom(error);
+        }
       } finally {
         for (const device of this.devices) {
           this.emitStatus(device, "stopped");
@@ -253,6 +281,7 @@ export class BluetoothClient {
           this.scanner.discover(
             BLUETOOTH_SERVICE_UUID,
             this.discoveryTimeoutMs,
+            { fallbackLocalName: config.serial },
           ),
           this.discoveryTimeoutMs + 1000,
           "Timed out scanning for BLE chargers",
@@ -263,9 +292,22 @@ export class BluetoothClient {
       }
 
       let connected = false;
-      const potentialCandidates = candidates
-        .filter((candidate) => !claimedCandidateIds.has(candidate.id))
+      const unclaimedCandidates = candidates.filter(
+        (candidate) => !claimedCandidateIds.has(candidate.id),
+      );
+      const potentialCandidates = unclaimedCandidates
+        .filter((candidate) => candidate.connectable !== false)
         .slice(0, this.maxCandidatesPerDevice);
+      if (potentialCandidates.length === 0) {
+        const reason =
+          candidates.length === 0
+            ? "No advertisements matching the Easee service UUID or configured charger name were found"
+            : unclaimedCandidates.length === 0
+              ? "All matching BLE advertisements were already assigned to another configured charger"
+              : "Matching BLE advertisements were not connectable; open the charger's Bluetooth window and retry";
+        this.emitStatus(config, "disconnected", new Error(reason));
+        continue;
+      }
       for (const candidate of potentialCandidates) {
         if (this.stopping) {
           return;
@@ -288,12 +330,7 @@ export class BluetoothClient {
             this.connecting.delete(connection);
             await this.closeConnection(connection);
           }
-          if (
-            error instanceof BluetoothAuthenticationError ||
-            error instanceof BluetoothProtocolError
-          ) {
-            this.emitStatus(config, "connecting", error);
-          }
+          this.emitStatus(config, "connecting", errorFrom(error));
         }
       }
       if (!connected && !this.stopping) {
@@ -330,10 +367,12 @@ export class BluetoothClient {
     const connection: DeviceConnection = {
       config,
       candidateId: candidate.id,
+      pairingAllowed: candidate.name === config.serial,
       link,
       key: Buffer.alloc(0),
       connected: true,
       closed: false,
+      pairAttempted: false,
       operationTail: Promise.resolve(),
     };
     this.connecting.add(connection);
@@ -395,6 +434,34 @@ export class BluetoothClient {
     );
   }
 
+  private async writeWithPairRetry(
+    connection: DeviceConnection,
+    channel: BluetoothChannel,
+    payload: Buffer,
+  ): Promise<void> {
+    try {
+      await connection.link.write(channel, payload);
+    } catch (error) {
+      const pair = connection.link.pair;
+      if (
+        connection.pairAttempted ||
+        !connection.pairingAllowed ||
+        !pair ||
+        !isAuthenticationWriteError(error)
+      ) {
+        throw error;
+      }
+      connection.pairAttempted = true;
+      this.pauseNotificationTimeout(connection);
+      try {
+        await pair.call(connection.link);
+        await connection.link.write(channel, payload);
+      } finally {
+        this.resumeNotificationTimeout(connection);
+      }
+    }
+  }
+
   private exchange(
     connection: DeviceConnection,
     channel: BluetoothChannel,
@@ -403,7 +470,7 @@ export class BluetoothClient {
     this.assertConnected(connection);
     const reply = this.waitForNotification(connection, channel);
     const write = Promise.resolve().then(() =>
-      connection.link.write(channel, payload),
+      this.writeWithPairRetry(connection, channel, payload),
     );
     return Promise.all([write, reply])
       .then(([, data]) => data)
@@ -444,18 +511,47 @@ export class BluetoothClient {
       );
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (connection.pending?.timer === timer) {
-          connection.pending = undefined;
-          reject(
-            new BluetoothProtocolError(
-              `Timed out waiting for BLE ${channel} response`,
-            ),
-          );
-        }
-      }, this.requestTimeoutMs);
-      connection.pending = { channel, resolve, reject, timer };
+      const pending: PendingNotification = { channel, resolve, reject };
+      connection.pending = pending;
+      this.startNotificationTimeout(connection, pending);
     });
+  }
+
+  private startNotificationTimeout(
+    connection: DeviceConnection,
+    pending: PendingNotification,
+  ): void {
+    if (connection.pending !== pending || pending.timer) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (connection.pending === pending && pending.timer === timer) {
+        connection.pending = undefined;
+        pending.timer = undefined;
+        pending.reject(
+          new BluetoothProtocolError(
+            `Timed out waiting for BLE ${pending.channel} response`,
+          ),
+        );
+      }
+    }, this.requestTimeoutMs);
+    pending.timer = timer;
+  }
+
+  private pauseNotificationTimeout(connection: DeviceConnection): void {
+    const pending = connection.pending;
+    if (!pending?.timer) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    pending.timer = undefined;
+  }
+
+  private resumeNotificationTimeout(connection: DeviceConnection): void {
+    const pending = connection.pending;
+    if (pending) {
+      this.startNotificationTimeout(connection, pending);
+    }
   }
 
   private handleNotification(
@@ -468,7 +564,10 @@ export class BluetoothClient {
       return;
     }
     connection.pending = undefined;
-    clearTimeout(pending.timer);
+    if (pending.timer) {
+      clearTimeout(pending.timer);
+      pending.timer = undefined;
+    }
     pending.resolve(Buffer.from(data));
   }
 
@@ -504,7 +603,10 @@ export class BluetoothClient {
       return;
     }
     connection.pending = undefined;
-    clearTimeout(pending.timer);
+    if (pending.timer) {
+      clearTimeout(pending.timer);
+      pending.timer = undefined;
+    }
     pending.reject(error);
   }
 

@@ -59,9 +59,77 @@ describe("connection mode configuration", () => {
     ]);
   });
 
+  it("parses the managed charger list from adapter configuration", () => {
+    expect(
+      parseBluetoothChargerSettings({
+        bluetoothChargerList: [
+          { serialNumber: "EMX123456", pin: "1234", name: "Garage" },
+          { serialNumber: "EMX654321", pin: "5678", name: "" },
+        ],
+      }),
+    ).to.deep.equal([
+      { serialNumber: "EMX123456", pin: "1234", name: "Garage" },
+      { serialNumber: "EMX654321", pin: "5678", name: "EMX654321" },
+    ]);
+  });
+
+  it("prefers the managed charger list over legacy settings", () => {
+    expect(
+      parseBluetoothChargerSettings({
+        bluetoothChargerList: [
+          { serialNumber: "EMX654321", pin: "5678", name: "New charger" },
+        ],
+        bluetoothCharger1SerialNumber: "EMX123456",
+        bluetoothCharger1Pin: "1234",
+        bluetoothChargers:
+          '[{"serialNumber":"EMX789012","pin":"9012","name":"Legacy"}]',
+      }),
+    ).to.deep.equal([
+      { serialNumber: "EMX654321", pin: "5678", name: "New charger" },
+    ]);
+  });
+
+  it("rejects malformed managed charger data without falling back to legacy values", () => {
+    expect(() =>
+      parseBluetoothChargerSettings({
+        bluetoothChargerList: { serialNumber: "EMX123456", pin: "1234" },
+        bluetoothChargers:
+          '[{"serialNumber":"EMX654321","pin":"5678","name":"Legacy"}]',
+      }),
+    ).to.throw("Bluetooth charger configuration must be a list");
+  });
+
+  it("continues using existing legacy settings while the managed list is empty", () => {
+    expect(
+      parseBluetoothChargerSettings({
+        bluetoothChargerList: [],
+        bluetoothCharger1SerialNumber: "EMX123456",
+        bluetoothCharger1Pin: "1234",
+        bluetoothCharger1Name: "Existing charger",
+        bluetoothChargers: "[]",
+      }),
+    ).to.deep.equal([
+      {
+        serialNumber: "EMX123456",
+        pin: "1234",
+        name: "Existing charger",
+      },
+    ]);
+  });
+
+  it("accepts an empty charger configuration before the first Device Manager entry", () => {
+    expect(
+      parseBluetoothChargerSettings({
+        bluetoothChargerList: [],
+        bluetoothChargers: "[]",
+      }),
+    ).to.deep.equal([]);
+  });
+
   it("keeps reading the encrypted legacy JSON setting when form fields are empty", () => {
     expect(
       parseBluetoothChargerSettings({
+        bluetoothChargerList: [],
         bluetoothCharger1SerialNumber: "",
         bluetoothCharger1Pin: "",
         bluetoothChargers:

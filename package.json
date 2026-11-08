@@ -21,9 +21,11 @@
   },
   "dependencies": {
     "@iobroker/adapter-core": "^3.4.3",
+    "@iobroker/dm-utils": "^3.2.1",
     "@microsoft/signalr": "^10.0.11",
     "@stoprocent/noble": "^2.8.0",
     "axios": "^1.7.9",
+    "dbus-next": "^0.10.2",
     "tough-cookie": "^6.0.2"
   },
   "devDependencies": {
@@ -40,9 +42,10 @@
     "@types/tough-cookie": "^4.0.5",
     "typescript": "^5.7.3"
   },
-  "main": "main.ts",
+  "main": "build/main.js",
   "files": [
     "admin/",
+    "build/",
     "docs/",
     "lib/",
     "io-package.json",
@@ -54,8 +57,9 @@
   "scripts": {
     "translate": "translate-adapter",
     "release": "release-script",
+    "build": "tsc -p tsconfig.build.json",
     "test:js": "mocha --config test/mocharc.custom.json \"{!(node_modules|test)/**/*.test.{js,ts},*.test.{js,ts},test/**/test!(PackageFiles|Startup).{js,ts}}\"",
-    "test:package": "mocha test/package --exit",
+    "test:package": "npm run build && mocha test/package --exit",
     "test:integration": "mocha test/integration --exit",
     "test": "npm run test:js && npm run test:package",
     "check": "tsc --noEmit -p tsconfig.check.json",

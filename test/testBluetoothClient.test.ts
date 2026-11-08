@@ -9,6 +9,7 @@ import { BluetoothHandshake } from "../lib/bluetooth-protocol.ts";
 import { BluetoothClient } from "../lib/bluetooth-client.ts";
 import type {
   BluetoothCandidate,
+  BluetoothDiscoveryOptions,
   BluetoothLink,
   BluetoothScanner,
 } from "../lib/bluetooth-transport.ts";
@@ -53,13 +54,19 @@ function decryptRequest(data: Buffer, key: Buffer): Record<string, unknown> {
 class FakeLink implements BluetoothLink {
   readonly writes: { channel: string; data: Buffer }[] = [];
   disconnectCount = 0;
+  pairCalls = 0;
+  pairFailure?: Error;
+  pairDelayMs = 0;
+  authenticationWriteFailures: Error[] = [];
   stateResponses = 0;
   suppressStateAfterInitial = false;
   deferCommands = false;
   commandReplyCode = 1;
+  pair?: () => Promise<void>;
   private readonly subscribers = new Map<string, (data: Buffer) => void>();
   private disconnected?: () => void;
   private activeCommandCount = 0;
+  private successfulHelloWrites = 0;
   private readonly serverHandshake: BluetoothHandshake;
   private clientRoundOne?: Buffer;
   private serverKey?: Buffer;
@@ -68,8 +75,23 @@ class FakeLink implements BluetoothLink {
   constructor(
     serverPin: string,
     private readonly expectedSerial: string,
+    supportsPairing = true,
   ) {
     this.serverHandshake = new BluetoothHandshake(serverPin, "server");
+    if (supportsPairing) {
+      this.pair = () => {
+        this.pairCalls++;
+        return new Promise((resolve, reject) => {
+          setTimeout(() => {
+            if (this.pairFailure) {
+              reject(this.pairFailure);
+            } else {
+              resolve();
+            }
+          }, this.pairDelayMs);
+        });
+      };
+    }
   }
 
   subscribe(channel: string, listener: (data: Buffer) => void): Promise<void> {
@@ -79,10 +101,12 @@ class FakeLink implements BluetoothLink {
 
   write(channel: string, data: Buffer): Promise<void> {
     this.writes.push({ channel, data: Buffer.from(data) });
+    const authenticationWriteFailure = this.authenticationWriteFailures.shift();
+    if (authenticationWriteFailure) {
+      return Promise.reject(authenticationWriteFailure);
+    }
     if (channel === "hello") {
-      const round = this.writes.filter(
-        (write) => write.channel === "hello",
-      ).length;
+      const round = ++this.successfulHelloWrites;
       if (round === 1) {
         this.clientRoundOne = Buffer.from(data);
         queueMicrotask(() =>
@@ -184,31 +208,63 @@ class FakeScanner implements BluetoothScanner {
   readonly link: FakeLink;
   closed = false;
   connects: string[] = [];
+  connectFailure?: Error;
   discoveryCalls = 0;
   discoveryFailures = 0;
+  readonly fallbackLocalNames: (string | undefined)[] = [];
+  discoveryResults: readonly BluetoothCandidate[];
 
   constructor(serverPin = "1234", expectedSerial = "EMX12345") {
     this.link = new FakeLink(serverPin, expectedSerial);
+    this.discoveryResults = [
+      { id: "temporary-device-address", name: expectedSerial },
+    ];
   }
 
-  discover(): Promise<readonly BluetoothCandidate[]> {
+  discover(
+    _serviceUuid: string,
+    _timeoutMs: number,
+    options?: BluetoothDiscoveryOptions,
+  ): Promise<readonly BluetoothCandidate[]> {
     this.discoveryCalls++;
+    this.fallbackLocalNames.push(options?.fallbackLocalName);
     if (this.discoveryFailures > 0) {
       this.discoveryFailures--;
       return Promise.reject(new Error("simulated scan failure"));
     }
-    return Promise.resolve([
-      { id: "temporary-device-address", name: "Charger" },
-    ]);
+    return Promise.resolve(this.discoveryResults);
   }
 
   connect(candidate: BluetoothCandidate): Promise<BluetoothLink> {
     this.connects.push(candidate.id);
-    return Promise.resolve(this.link);
+    return this.connectFailure
+      ? Promise.reject(this.connectFailure)
+      : Promise.resolve(this.link);
   }
 
   close(): Promise<void> {
     this.closed = true;
+    return Promise.resolve();
+  }
+}
+
+class PendingDiscoveryScanner implements BluetoothScanner {
+  closed = false;
+  resolveDiscovery?: (candidates: readonly BluetoothCandidate[]) => void;
+
+  discover(): Promise<readonly BluetoothCandidate[]> {
+    return new Promise((resolve) => {
+      this.resolveDiscovery = resolve;
+    });
+  }
+
+  connect(): Promise<BluetoothLink> {
+    return Promise.reject(new Error("No device should be connected"));
+  }
+
+  close(): Promise<void> {
+    this.closed = true;
+    this.resolveDiscovery?.([]);
     return Promise.resolve();
   }
 }
@@ -268,6 +324,229 @@ function client(
 }
 
 describe("Bluetooth client boundary", () => {
+  it("closes an active discovery scan immediately when stopping", async () => {
+    const scanner = new PendingDiscoveryScanner();
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { discoveryTimeoutMs: 1000 },
+    );
+    const starting = instance.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const stopping = instance.stop();
+    await Promise.resolve();
+    expect(scanner.closed).to.equal(true);
+    await Promise.all([starting, stopping]);
+  });
+
+  it("uses the configured serial as the exact local-name fallback", async () => {
+    const scanner = new FakeScanner();
+    const instance = client(scanner);
+
+    await instance.start();
+
+    expect(scanner.fallbackLocalNames).to.deep.equal(["EMX12345"]);
+    await instance.stop();
+  });
+
+  it("reports generic candidate connection failures such as GATT validation errors", async () => {
+    const scanner = new FakeScanner();
+    scanner.connectFailure = new Error(
+      "Expected exactly one BLE service; found 0",
+    );
+    const statuses: Array<{ status: string; error?: Error }> = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { onStatus: (event) => statuses.push(event) },
+    );
+
+    await instance.start();
+
+    expect(
+      statuses.find(
+        (event) => event.status === "connecting" && event.error !== undefined,
+      )?.error?.message,
+    ).to.equal("Expected exactly one BLE service; found 0");
+    expect(statuses.at(-1)?.status).to.equal("disconnected");
+    await instance.stop();
+  });
+
+  it("reports when discovery found no advertisements for the Easee service", async () => {
+    const scanner = new FakeScanner();
+    scanner.discoveryResults = [];
+    const statuses: Array<{
+      status: string;
+      error?: Error;
+    }> = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { onStatus: (event) => statuses.push(event) },
+    );
+
+    await instance.start();
+
+    expect(statuses.at(-1)?.status).to.equal("disconnected");
+    expect(statuses.at(-1)?.error?.message).to.equal(
+      "No advertisements matching the Easee service UUID or configured charger name were found",
+    );
+    await instance.stop();
+  });
+
+  it("does not connect to matching advertisements reported as non-connectable", async () => {
+    const scanner = new FakeScanner();
+    scanner.discoveryResults = [
+      { id: "non-connectable-device", name: "EMX12345", connectable: false },
+    ];
+    const statuses: Array<{ status: string; error?: Error }> = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { onStatus: (event) => statuses.push(event) },
+    );
+
+    await instance.start();
+
+    expect(scanner.connects).to.deep.equal([]);
+    expect(statuses.at(-1)?.status).to.equal("disconnected");
+    expect(statuses.at(-1)?.error?.message).to.equal(
+      "Matching BLE advertisements were not connectable; open the charger's Bluetooth window and retry",
+    );
+    await instance.stop();
+  });
+
+  it("pairs once after an ATT authentication error and retries the write", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.authenticationWriteFailures.push(
+      new Error("ATT Insufficient Authentication (0x05)"),
+    );
+    scanner.link.pairDelayMs = 40;
+    const instance = client(scanner, "1234", 20);
+
+    await instance.start();
+
+    expect(scanner.link.pairCalls).to.equal(1);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(3);
+    expect(scanner.link.disconnectCount).to.equal(0);
+    await instance.stop();
+  });
+
+  it("does not pair or retry unless the advertised name exactly matches the serial", async () => {
+    const scanner = new FakeScanner();
+    scanner.discoveryResults = [{ id: "wrong-name-device", name: "emx12345" }];
+    scanner.link.authenticationWriteFailures.push(
+      new Error("ATT Insufficient Authentication (0x05)"),
+    );
+    const instance = client(scanner);
+
+    await instance.start();
+
+    expect(scanner.connects).to.deep.equal(["wrong-name-device"]);
+    expect(scanner.link.pairCalls).to.equal(0);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(1);
+    await instance.stop();
+  });
+
+  it("recognizes BlueZ NotAuthorized D-Bus errors without a descriptive message", async () => {
+    const scanner = new FakeScanner();
+    const authenticationError = new Error("GATT operation failed");
+    authenticationError.name = "org.bluez.Error.NotAuthorized";
+    scanner.link.authenticationWriteFailures.push(authenticationError);
+    const instance = client(scanner);
+
+    await instance.start();
+
+    expect(scanner.link.pairCalls).to.equal(1);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(3);
+    await instance.stop();
+  });
+
+  it("caps pairing and write retry at one attempt per connection", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.authenticationWriteFailures.push(
+      new Error("ATT Insufficient Authentication (0x05)"),
+      new Error("ATT Insufficient Authentication (0x05)"),
+    );
+    const instance = client(scanner);
+
+    await instance.start();
+
+    expect(scanner.link.pairCalls).to.equal(1);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(2);
+    await instance.stop();
+  });
+
+  it("surfaces a BlueZ pairing failure without retrying the write", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.authenticationWriteFailures.push(
+      new Error("org.bluez.Error.NotAuthorized: Insufficient Authentication"),
+    );
+    scanner.link.pairFailure = new Error(
+      "BlueZ pairing failed: org.bluez.Error.AuthenticationCanceled",
+    );
+    const statuses: Array<{ status: string; error?: Error }> = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { onStatus: (event) => statuses.push(event) },
+    );
+
+    await instance.start();
+
+    expect(scanner.link.pairCalls).to.equal(1);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(1);
+    expect(
+      statuses.find((event) => event.status === "connecting" && event.error)
+        ?.error?.message,
+    ).to.equal("BlueZ pairing failed: org.bluez.Error.AuthenticationCanceled");
+    await instance.stop();
+  });
+
+  it("does not pair after a non-authentication write error", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.authenticationWriteFailures.push(
+      new Error("GATT write failed: Operation not permitted"),
+    );
+    const instance = client(scanner);
+
+    await instance.start();
+
+    expect(scanner.link.pairCalls).to.equal(0);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(1);
+    await instance.stop();
+  });
+
+  it("does not pair or retry on a non-BlueZ link", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.pair = undefined;
+    scanner.link.authenticationWriteFailures.push(
+      new Error("ATT Insufficient Authentication (0x05)"),
+    );
+    const instance = client(scanner);
+
+    await instance.start();
+
+    expect(scanner.link.pairCalls).to.equal(0);
+    expect(
+      scanner.link.writes.filter((write) => write.channel === "hello"),
+    ).to.have.length(1);
+    await instance.stop();
+  });
+
   it("does not bind a discovery when a wrong PIN cannot authenticate reads", async () => {
     const scanner = new FakeScanner("1234");
     const statuses: string[] = [];

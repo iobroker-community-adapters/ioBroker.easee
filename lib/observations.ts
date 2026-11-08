@@ -42,6 +42,8 @@ const STATE_FIELDS_BY_OBSERVATION_ID: Record<
   199: "inVoltageT4T5",
 };
 
+const BOOLEAN_OBSERVATION_IDS = new Set([30, 68, 102, 103]);
+
 const SUPPLY_VOLTAGE_FIELDS = [
   "inVoltageT2T3",
   "inVoltageT1T3",
@@ -197,7 +199,12 @@ function normalizeObservationValue(
   id: number,
   value: ioBroker.StateValue,
 ): ioBroker.StateValue | undefined {
-  return id === 30 || id === 103 ? normalizeBooleanObservation(value) : value;
+  if (BOOLEAN_OBSERVATION_IDS.has(id)) {
+    return normalizeBooleanObservation(value);
+  }
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 /**
