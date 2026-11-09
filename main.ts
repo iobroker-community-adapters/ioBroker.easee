@@ -6035,21 +6035,6 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
     return this.getChargerInfo(charger);
   }
 
-  private async getBluetoothCardState(
-    stateId: string,
-  ): Promise<ioBroker.State> {
-    const state = await this.adapter.getStateAsync(stateId);
-    return (
-      state ?? {
-        val: null,
-        ack: true,
-        ts: 0,
-        lc: 0,
-        from: `system.adapter.${this.adapter.namespace}`,
-      }
-    );
-  }
-
   private getChargerInfo(charger: BluetoothChargerConfig): DeviceInfo<string> {
     const serialNumber = charger.serialNumber;
     return {
@@ -6063,50 +6048,54 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
           mapping: { true: "connected", false: "disconnected" },
         },
       },
-      controls: [
-        {
-          id: "totalPower",
-          type: "info",
-          stateId: `${this.adapter.namespace}.${serialNumber}.status.totalPower`,
-          label: {
-            en: "Charging power",
-            de: "Ladeleistung",
-            es: "Potencia de carga",
-            fr: "Puissance de charge",
-            it: "Potenza di ricarica",
-            nl: "Laadvermogen",
-            pl: "Moc ładowania",
-            pt: "Potência de carregamento",
-            ru: "Мощность зарядки",
-            uk: "Потужність заряджання",
-            "zh-cn": "充电功率",
+      customInfo: {
+        id: serialNumber,
+        schema: {
+          type: "panel",
+          items: {
+            totalPower: {
+              type: "state",
+              oid: `${this.adapter.namespace}.${serialNumber}.status.totalPower`,
+              foreign: true,
+              control: "text",
+              label: {
+                en: "Charging power",
+                de: "Ladeleistung",
+                es: "Potencia de carga",
+                fr: "Puissance de charge",
+                it: "Potenza di ricarica",
+                nl: "Laadvermogen",
+                pl: "Moc ładowania",
+                pt: "Potência de carregamento",
+                ru: "Мощность зарядки",
+                uk: "Потужність заряджання",
+                "zh-cn": "充电功率",
+              },
+              unit: "kW",
+            },
+            bluetoothRSSI: {
+              type: "state",
+              oid: `${this.adapter.namespace}.${serialNumber}.info.bluetoothRSSI`,
+              foreign: true,
+              control: "text",
+              label: {
+                en: "Bluetooth signal strength",
+                de: "Bluetooth-Signalstärke",
+                es: "Intensidad de la señal Bluetooth",
+                fr: "Intensité du signal Bluetooth",
+                it: "Intensità del segnale Bluetooth",
+                nl: "Bluetooth-signaalsterkte",
+                pl: "Siła sygnału Bluetooth",
+                pt: "Intensidade do sinal Bluetooth",
+                ru: "Уровень сигнала Bluetooth",
+                uk: "Рівень сигналу Bluetooth",
+                "zh-cn": "蓝牙信号强度",
+              },
+              unit: "dBm",
+            },
           },
-          unit: "kW",
-          getStateHandler: async () =>
-            this.getBluetoothCardState(`${serialNumber}.status.totalPower`),
         },
-        {
-          id: "bluetoothRSSI",
-          type: "info",
-          stateId: `${this.adapter.namespace}.${serialNumber}.info.bluetoothRSSI`,
-          label: {
-            en: "Bluetooth signal strength",
-            de: "Bluetooth-Signalstärke",
-            es: "Intensidad de la señal Bluetooth",
-            fr: "Intensité du signal Bluetooth",
-            it: "Intensità del segnale Bluetooth",
-            nl: "Bluetooth-signaalsterkte",
-            pl: "Siła sygnału Bluetooth",
-            pt: "Intensidade do sinal Bluetooth",
-            ru: "Уровень сигнала Bluetooth",
-            uk: "Рівень сигналу Bluetooth",
-            "zh-cn": "蓝牙信号强度",
-          },
-          unit: "dBm",
-          getStateHandler: async () =>
-            this.getBluetoothCardState(`${serialNumber}.info.bluetoothRSSI`),
-        },
-      ] as unknown as NonNullable<DeviceInfo<string>["controls"]>,
+      },
       actions: [
         {
           id: "editBluetoothCharger",
