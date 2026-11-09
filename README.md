@@ -31,8 +31,20 @@ In Bluetooth mode, chargers can be added and removed individually in the
 ioBroker Device Manager. The settings page shows the local Bluetooth adapter
 state, whether a manual search can currently start, and offers a 30-second
 manual search with live results; results are not added automatically. These
-statuses do not confirm that a charger is nearby or advertising. See the
-[Bluetooth guide](./docs/bluetooth.md) for what they can (and cannot) confirm.
+statuses do not confirm that a charger is nearby or advertising. Bluetooth
+settings offer Automatic, BlueZ D-Bus, and Raw HCI; on Linux, Raw HCI requires
+`CAP_NET_RAW` and can conflict with BlueZ or other scanners. Manual BLE searches
+recognize the Easee service UUID or manufacturer ID 3118 and never add results
+to configuration. Raw HCI requests ATT MTU 333 and negotiates the effective MTU
+as `min(333, peer MTU)`. This lets the 330-byte HELLO plus its 3-byte ATT header
+fit one normal Write Request only when the peer supports MTU 333 or higher; a
+lower peer MTU still uses Noble's long-write path. Non-security ATT errors in
+that path are surfaced to the write callback and pending chunks are cleared.
+A Raspberry Pi Raw-HCI test completed the HELLO handshake and authenticated
+config/state reads; this confirms the tested setup only.
+The Bluetooth guide also explains how to collect matching adapter, `btmon`, and
+BlueZ logs for Linux connection troubleshooting. See the
+[Bluetooth guide](./docs/bluetooth.md) for setup and limitations.
 
 `status.authToken` and `status.authTokenName` are cleared when charging starts (Easee Observation 109). The API does not provide the token at session start. The adapter checks for a completed session when the charger enters Completed mode or the car disconnects. Once Easee returns a token, it is stored in `status.authToken`; the adapter looks up the key owner in the logged-in account's Easee Keys and writes the name to `status.authTokenName`. The name is `unknown` if no matching name is available or the lookup fails. Both states remain empty until a token is available. Keys belonging to other accounts may not be resolvable.
 
@@ -69,12 +81,18 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+- (Voodoo2man) Raw HCI MTU 333 completed the HELLO handshake and authenticated reads in a Raspberry Pi test.
+- Added a Raw-HCI-only retry for incomplete GATT characteristic discovery after a 250 ms quiet window.
+- (Voodoo2man) Expanded payload-free Bluetooth diagnostics with GATT characteristic UUIDs/properties, notification and write outcomes, specific HCI failure categories, and Linux trace collection guidance.
+- (Voodoo2man) Bluetooth configuration diagnostics now identify invalid stored fields without exposing secrets and are visible in the Device Manager.
 - (Voodoo2man) Bluetooth chargers were made individually manageable in the ioBroker Device Manager.
 - (Voodoo2man) Added an optional local Bluetooth connection mode with configured chargers and PINs.
 - (Voodoo2man) Corrected circuit phase reporting and command acknowledgements, and reject unsafe external charger IDs.
 - (Voodoo2man) Improved Cloud polling recovery and status reporting, retained session authorization details across restarts, and coordinated Bluetooth searches with pending and active writes.
 - (Voodoo2man) Added live Bluetooth search readiness to adapter settings and improved PIN-redacted scan and connection diagnostics.
+- (Voodoo2man) Added an Admin setting to select Automatic, BlueZ D-Bus, or Raw HCI for Bluetooth connections.
 - (Voodoo2man) Added exact configured-serial BLE name fallback with GATT validation and extended manual search to 30 seconds with live results.
+- (Voodoo2man) Matched manual BLE searches against Easee's manufacturer signature, added best-effort macOS and opt-in raw-HCI fallbacks for chargers missing notification descriptors, and logged the selected Noble binding at startup.
 - (Voodoo2man) Linux Bluetooth now uses BlueZ D-Bus by default, preserves Noble binding overrides, skips reliably reported non-connectable advertisements, and treats D-Bus connectability as unknown.
 - (Voodoo2man) Linux BlueZ now pairs once after an ATT authentication error and retries the affected GATT write once, only when the advertised charger name exactly matches its configured serial.
 - (Voodoo2man) Manual BLE searches reset reconnect backoff so cancelled retries do not delay the next automatic charger connection attempt.

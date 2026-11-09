@@ -38,6 +38,33 @@
             "text": "Bluetooth mode requires a compatible Bluetooth LE adapter and platform-specific permissions. Add or remove chargers in the ioBroker Device Manager. PINs are encrypted in the adapter configuration. See the Bluetooth guide for setup and limitations.",
             "hidden": "data.connectionMode !== 'bluetooth'"
         },
+        "bluetoothBinding": {
+            "newLine": true,
+            "type": "select",
+            "xs": 12,
+            "sm": 12,
+            "md": 6,
+            "lg": 4,
+            "xl": 4,
+            "options": [
+                {
+                    "label": "Automatic",
+                    "value": "auto"
+                },
+                {
+                    "label": "BlueZ D-Bus",
+                    "value": "dbus"
+                },
+                {
+                    "label": "Raw HCI",
+                    "value": "hci"
+                }
+            ],
+            "default": "auto",
+            "label": "Bluetooth binding",
+            "help": "Automatic uses the platform default and honors NOBLE_BINDINGS. On Linux, Raw HCI requires CAP_NET_RAW and may conflict with BlueZ or other Bluetooth clients.",
+            "hidden": "data.connectionMode !== 'bluetooth'"
+        },
         "_bluetoothAdapterStatus": {
             "newLine": true,
             "type": "state",

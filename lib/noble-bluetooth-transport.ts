@@ -1,5 +1,8 @@
+import { hciStatusMessage } from "@stoprocent/noble";
+import { createRequire } from "node:module";
 import type {
   Characteristic,
+  DisconnectReason,
   Noble,
   Peripheral,
   Service,
@@ -11,6 +14,12 @@ import {
   BLUETOOTH_SERVICE_UUID,
 } from "./bluetooth-protocol.ts";
 import type { BluetoothChannel } from "./bluetooth-protocol.ts";
+import { applyNobleHciMtuWorkaround } from "./noble-hci-mtu-workaround.ts";
+import {
+  bluetoothDiagnosticNow,
+  logBluetoothDiagnostic,
+} from "./bluetooth-diagnostics.ts";
+import type { BluetoothDiagnosticLogger } from "./bluetooth-diagnostics.ts";
 import type {
   BluetoothAdapterState,
   BluetoothAdapterStatusProvider,
@@ -20,22 +29,35 @@ import type {
   BluetoothScanner,
 } from "./bluetooth-transport.ts";
 
-type NobleFactory = () => Promise<Noble>;
+type NobleFactory = (binding?: NobleBinding) => Promise<Noble>;
 type NobleBluetoothScannerInterfaces = BluetoothScanner &
   BluetoothAdapterStatusProvider;
 type NobleBinding = "default" | "hci" | "dbus" | "mac" | "win";
 
 const NOBLE_BINDINGS = new Set(["hci", "dbus", "mac", "win"]);
 
-/** Selects Noble's Linux binding while honoring an explicit binding override. */
+/**
+ * Selects a Noble binding, preferring an explicit adapter setting over environment overrides.
+ *
+ * @param platform - Runtime platform.
+ * @param configuredBinding - Adapter setting; `auto` defers to the environment or platform default.
+ * @param environmentBinding - Optional `NOBLE_BINDINGS` override.
+ */
 export function resolveNobleBinding(
   platform: NodeJS.Platform,
   configuredBinding?: string,
+  environmentBinding?: string,
 ): NobleBinding {
-  const binding = configuredBinding?.trim().toLowerCase();
-  if (binding && NOBLE_BINDINGS.has(binding)) {
-    return binding as NobleBinding;
+  const configured = configuredBinding?.trim().toLowerCase();
+  if (configured && configured !== "auto" && NOBLE_BINDINGS.has(configured)) {
+    return configured as NobleBinding;
   }
+
+  const environment = environmentBinding?.trim().toLowerCase();
+  if (environment && NOBLE_BINDINGS.has(environment)) {
+    return environment as NobleBinding;
+  }
+
   return platform === "linux" ? "dbus" : "default";
 }
 
@@ -45,9 +67,20 @@ const BLUEZ_SERVICE = "org.bluez";
 const BLUEZ_DEVICE_INTERFACE = "org.bluez.Device1";
 const BLUEZ_OBJECT_MANAGER_INTERFACE = "org.freedesktop.DBus.ObjectManager";
 const BLUEZ_PAIR_TIMEOUT_MS = 30_000;
+const CHARACTERISTIC_DISCOVERY_RETRY_QUIET_WINDOW_MS = 250;
+const EASEE_MANUFACTURER_ID = 3118;
+const CLIENT_CHARACTERISTIC_CONFIGURATION_UUIDS = new Set([
+  "2902",
+  "0000290200001000800000805f9b34fb",
+]);
 
 function normalizeUuid(uuid: string): string {
   return uuid.toLowerCase().replace(/-/g, "");
+}
+
+function isAttributeNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /attribute (?:could not be found|not found)/i.test(message);
 }
 
 function hasService(peripheral: Peripheral, serviceUuid: string): boolean {
@@ -57,6 +90,15 @@ function hasService(peripheral: Peripheral, serviceUuid: string): boolean {
     advertised.some(
       (uuid) => normalizeUuid(uuid) === normalizeUuid(serviceUuid),
     )
+  );
+}
+
+function hasEaseeManufacturerId(peripheral: Peripheral): boolean {
+  const data = peripheral.advertisement?.manufacturerData;
+  return (
+    Buffer.isBuffer(data) &&
+    data.length >= 2 &&
+    data.readUInt16LE(0) === EASEE_MANUFACTURER_ID
   );
 }
 
@@ -180,15 +222,61 @@ export async function pairBluezDevice(
   }
 }
 
-async function loadDefaultNoble(): Promise<Noble> {
+async function loadDefaultNoble(binding?: NobleBinding): Promise<Noble> {
+  const selectedBinding =
+    binding ??
+    resolveNobleBinding(
+      process.platform,
+      undefined,
+      process.env.NOBLE_BINDINGS,
+    );
+
+  if (selectedBinding === "hci") {
+    try {
+      const requireFromAdapter = createRequire(__filename);
+      const gattConstructor = requireFromAdapter(
+        "@stoprocent/noble/lib/hci-socket/gatt.js",
+      ) as { prototype?: unknown };
+      const bindingsConstructor = requireFromAdapter(
+        "@stoprocent/noble/lib/hci-socket/bindings.js",
+      ) as { prototype?: unknown };
+      applyNobleHciMtuWorkaround(
+        selectedBinding,
+        typeof gattConstructor === "function"
+          ? gattConstructor.prototype
+          : undefined,
+        typeof bindingsConstructor === "function"
+          ? bindingsConstructor.prototype
+          : undefined,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith("Raw HCI ATT MTU workaround is incompatible")
+      ) {
+        throw error;
+      }
+      throw new Error(
+        "Raw HCI ATT MTU workaround could not load or patch @stoprocent/noble's expected HCI GATT implementation",
+        { cause: error },
+      );
+    }
+  }
+
   const nobleModule = await import("@stoprocent/noble");
-  const binding = resolveNobleBinding(
-    process.platform,
-    process.env.NOBLE_BINDINGS,
-  );
   // Noble 2.8 supports D-Bus at runtime, but omits it from the published BindingType union.
   return nobleModule.withBindings(
-    binding as Parameters<typeof nobleModule.withBindings>[0],
+    selectedBinding as Parameters<typeof nobleModule.withBindings>[0],
+  );
+}
+
+function matchingCharacteristics(
+  characteristics: readonly Characteristic[],
+  uuid: string,
+): Characteristic[] {
+  return characteristics.filter(
+    (characteristic) =>
+      normalizeUuid(characteristic.uuid) === normalizeUuid(uuid),
   );
 }
 
@@ -196,10 +284,7 @@ function exactCharacteristic(
   characteristics: readonly Characteristic[],
   uuid: string,
 ): Characteristic {
-  const matches = characteristics.filter(
-    (characteristic) =>
-      normalizeUuid(characteristic.uuid) === normalizeUuid(uuid),
-  );
+  const matches = matchingCharacteristics(characteristics, uuid);
   if (matches.length !== 1) {
     throw new Error(
       `Expected exactly one BLE characteristic ${uuid}; found ${matches.length}`,
@@ -210,30 +295,163 @@ function exactCharacteristic(
 
 async function resolveCharacteristics(
   peripheral: Peripheral,
+  diagnosticLogger?: BluetoothDiagnosticLogger,
+  retryIncompleteCharacteristics = false,
 ): Promise<ReadonlyMap<BluetoothChannel, Characteristic>> {
-  const services = await peripheral.discoverServicesAsync([
-    normalizeUuid(BLUETOOTH_SERVICE_UUID),
-  ]);
-  const matchingServices = services.filter(
-    (service) =>
-      normalizeUuid(service.uuid) === normalizeUuid(BLUETOOTH_SERVICE_UUID),
-  );
-  if (matchingServices.length !== 1) {
-    throw new Error(
-      `Expected exactly one BLE service ${BLUETOOTH_SERVICE_UUID}; found ${matchingServices.length}`,
+  const serviceDiscoveryStartedAt = bluetoothDiagnosticNow();
+  logBluetoothDiagnostic(diagnosticLogger, "gatt.service_discovery", "started");
+  let service: Service;
+  try {
+    const services = await peripheral.discoverServicesAsync([
+      normalizeUuid(BLUETOOTH_SERVICE_UUID),
+    ]);
+    const matchingServices = services.filter(
+      (candidate) =>
+        normalizeUuid(candidate.uuid) === normalizeUuid(BLUETOOTH_SERVICE_UUID),
     );
+    if (matchingServices.length !== 1) {
+      throw new Error(
+        `Expected exactly one BLE service ${BLUETOOTH_SERVICE_UUID}; found ${matchingServices.length}`,
+      );
+    }
+    service = matchingServices[0];
+    logBluetoothDiagnostic(
+      diagnosticLogger,
+      "gatt.service_discovery",
+      "completed",
+      {
+        durationMs: bluetoothDiagnosticNow() - serviceDiscoveryStartedAt,
+        fields: { matches: matchingServices.length },
+      },
+    );
+  } catch (error) {
+    logBluetoothDiagnostic(
+      diagnosticLogger,
+      "gatt.service_discovery",
+      "failed",
+      {
+        durationMs: bluetoothDiagnosticNow() - serviceDiscoveryStartedAt,
+        error,
+      },
+    );
+    throw error;
   }
 
-  const service: Service = matchingServices[0];
-  const characteristics = await service.discoverCharacteristicsAsync(
-    CHARACTERISTIC_UUIDS.map(normalizeUuid),
+  const characteristicDiscoveryStartedAt = bluetoothDiagnosticNow();
+  logBluetoothDiagnostic(
+    diagnosticLogger,
+    "gatt.characteristic_discovery",
+    "started",
   );
-  const resolved = new Map<BluetoothChannel, Characteristic>();
-  for (const channel of CHANNELS) {
-    const uuid = BLUETOOTH_CHARACTERISTICS[channel];
-    resolved.set(channel, exactCharacteristic(characteristics, uuid));
+  let attempt = 0;
+  let missingCount: number | undefined;
+  try {
+    let characteristics: readonly Characteristic[] = [];
+    while (true) {
+      attempt++;
+      missingCount = undefined;
+      characteristics = await service.discoverCharacteristicsAsync(
+        CHARACTERISTIC_UUIDS.map(normalizeUuid),
+      );
+      const missingChannels: BluetoothChannel[] = [];
+      for (const channel of CHANNELS) {
+        const uuid = BLUETOOTH_CHARACTERISTICS[channel];
+        const matches = matchingCharacteristics(characteristics, uuid);
+        if (matches.length > 1) {
+          exactCharacteristic(characteristics, uuid);
+        }
+        if (matches.length === 0) {
+          missingChannels.push(channel);
+        }
+      }
+      missingCount = missingChannels.length;
+      if (missingCount === 0) {
+        break;
+      }
+      if (attempt === 1 && retryIncompleteCharacteristics) {
+        logBluetoothDiagnostic(
+          diagnosticLogger,
+          "gatt.characteristic_discovery",
+          "retry",
+          {
+            durationMs:
+              bluetoothDiagnosticNow() - characteristicDiscoveryStartedAt,
+            fields: {
+              attempt,
+              missingCount,
+              quietWindowMs: CHARACTERISTIC_DISCOVERY_RETRY_QUIET_WINDOW_MS,
+            },
+          },
+        );
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, CHARACTERISTIC_DISCOVERY_RETRY_QUIET_WINDOW_MS),
+        );
+        continue;
+      }
+      exactCharacteristic(
+        characteristics,
+        BLUETOOTH_CHARACTERISTICS[missingChannels[0]],
+      );
+    }
+
+    const resolved = new Map<BluetoothChannel, Characteristic>();
+    for (const channel of CHANNELS) {
+      const uuid = BLUETOOTH_CHARACTERISTICS[channel];
+      const characteristic = exactCharacteristic(characteristics, uuid);
+      resolved.set(channel, characteristic);
+      logBluetoothDiagnostic(
+        diagnosticLogger,
+        "gatt.characteristic_resolved",
+        "completed",
+        {
+          fields: {
+            channel,
+            uuid: normalizeUuid(characteristic.uuid),
+            notify: characteristic.properties.includes("notify"),
+            indicate: characteristic.properties.includes("indicate"),
+            write: characteristic.properties.includes("write"),
+            writeWithoutResponse: characteristic.properties.includes(
+              "writeWithoutResponse",
+            ),
+          },
+        },
+      );
+    }
+    logBluetoothDiagnostic(
+      diagnosticLogger,
+      "gatt.characteristic_discovery",
+      "completed",
+      {
+        durationMs: bluetoothDiagnosticNow() - characteristicDiscoveryStartedAt,
+        fields: { count: resolved.size },
+      },
+    );
+    return resolved;
+  } catch (error) {
+    if (attempt > 1) {
+      logBluetoothDiagnostic(
+        diagnosticLogger,
+        "gatt.characteristic_discovery",
+        "retry_failed",
+        {
+          durationMs:
+            bluetoothDiagnosticNow() - characteristicDiscoveryStartedAt,
+          fields: { attempt, missingCount },
+          error,
+        },
+      );
+    }
+    logBluetoothDiagnostic(
+      diagnosticLogger,
+      "gatt.characteristic_discovery",
+      "failed",
+      {
+        durationMs: bluetoothDiagnosticNow() - characteristicDiscoveryStartedAt,
+        error,
+      },
+    );
+    throw error;
   }
-  return resolved;
 }
 
 class NobleBluetoothLink implements BluetoothLink {
@@ -241,9 +459,11 @@ class NobleBluetoothLink implements BluetoothLink {
     BluetoothChannel,
     (data: Buffer, isNotification: boolean) => void
   >();
+  private readonly passiveNotificationChannels = new Set<BluetoothChannel>();
   private disconnectListener?: () => void;
   private disconnected = false;
   private closing?: Promise<void>;
+  private readonly connectedAt = bluetoothDiagnosticNow();
   readonly pair?: () => Promise<void>;
 
   constructor(
@@ -253,6 +473,9 @@ class NobleBluetoothLink implements BluetoothLink {
       Characteristic
     >,
     pairDevice?: () => Promise<void>,
+    private readonly allowCoreBluetoothCccdFallback = false,
+    private readonly allowHciCccdlessNotifications = false,
+    private readonly diagnosticLogger?: BluetoothDiagnosticLogger,
   ) {
     this.pair = pairDevice;
     peripheral.on("disconnect", this.handleDisconnect);
@@ -262,50 +485,250 @@ class NobleBluetoothLink implements BluetoothLink {
     channel: BluetoothChannel,
     listener: (data: Buffer) => void,
   ): Promise<void> {
-    this.assertConnected();
-    const characteristic = this.getCharacteristic(channel);
-    if (
-      !characteristic.properties.some(
-        (property) => property === "notify" || property === "indicate",
-      )
-    ) {
-      throw new Error(
-        `BLE ${channel} characteristic does not support notifications`,
-      );
-    }
-    if (this.notificationListeners.has(channel)) {
-      throw new Error(`BLE ${channel} characteristic is already subscribed`);
-    }
-
-    const onData = (data: Buffer, isNotification: boolean): void => {
-      if (!this.disconnected && isNotification) {
-        listener(Buffer.from(data));
-      }
-    };
-    characteristic.on("data", onData);
-    this.notificationListeners.set(channel, onData);
+    const startedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.notification_setup",
+      "started",
+      { fields: { channel } },
+    );
+    let descriptorCount: number | undefined;
+    let cccdPresent: boolean | undefined;
     try {
-      await characteristic.subscribeAsync();
+      this.assertConnected();
+      const characteristic = this.getCharacteristic(channel);
+      if (
+        !characteristic.properties.some(
+          (property) => property === "notify" || property === "indicate",
+        )
+      ) {
+        throw new Error(
+          `BLE ${channel} characteristic does not support notifications`,
+        );
+      }
+      if (this.notificationListeners.has(channel)) {
+        throw new Error(`BLE ${channel} characteristic is already subscribed`);
+      }
+
+      let acceptNonNotificationData = false;
+      const onData = (
+        data: Buffer,
+        isNotification: boolean,
+        error?: Error,
+      ): void => {
+        const accepted =
+          !this.disconnected && (isNotification || acceptNonNotificationData);
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.characteristic_data",
+          accepted ? "accepted" : "ignored",
+          {
+            ...(error === undefined ? {} : { error }),
+            fields: {
+              channel,
+              uuid: normalizeUuid(characteristic.uuid),
+              byteLength: Buffer.isBuffer(data) ? data.length : 0,
+              isNotification,
+              accepted,
+              ...(!accepted
+                ? {
+                    ignoreReason: this.disconnected
+                      ? "disconnected"
+                      : "not_notification",
+                  }
+                : {}),
+            },
+          },
+        );
+        if (accepted) {
+          listener(Buffer.from(data));
+        }
+      };
+      characteristic.on("data", onData);
+      this.notificationListeners.set(channel, onData);
+      try {
+        if (this.allowHciCccdlessNotifications) {
+          const descriptors = await characteristic.discoverDescriptorsAsync();
+          descriptorCount = descriptors.length;
+          cccdPresent = descriptors.some((descriptor) =>
+            CLIENT_CHARACTERISTIC_CONFIGURATION_UUIDS.has(
+              normalizeUuid(descriptor.uuid),
+            ),
+          );
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.cccd_discovery",
+            "completed",
+            {
+              durationMs: bluetoothDiagnosticNow() - startedAt,
+              fields: { channel, descriptorCount, cccdPresent },
+            },
+          );
+          if (!cccdPresent) {
+            // Raw HCI dispatches unsolicited ATT notifications without a CCCD write.
+            this.passiveNotificationChannels.add(channel);
+            logBluetoothDiagnostic(
+              this.diagnosticLogger,
+              "transport.notification_setup",
+              "completed",
+              {
+                durationMs: bluetoothDiagnosticNow() - startedAt,
+                fields: {
+                  channel,
+                  mode: "passive",
+                  descriptorCount,
+                  cccdPresent,
+                },
+              },
+            );
+            return;
+          }
+        }
+        await characteristic.subscribeAsync();
+      } catch (error) {
+        if (
+          isAttributeNotFoundError(error) &&
+          this.allowCoreBluetoothCccdFallback
+        ) {
+          acceptNonNotificationData = true;
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.notification_setup",
+            "completed",
+            {
+              durationMs: bluetoothDiagnosticNow() - startedAt,
+              fields: {
+                channel,
+                mode: "corebluetooth_fallback",
+                ...(descriptorCount === undefined ? {} : { descriptorCount }),
+                ...(cccdPresent === undefined ? {} : { cccdPresent }),
+              },
+            },
+          );
+          return;
+        }
+        characteristic.removeListener("data", onData);
+        this.notificationListeners.delete(channel);
+        if (isAttributeNotFoundError(error)) {
+          throw new Error(
+            `BLE ${channel} notification subscription failed with ATT Attribute Not Found. This Noble binding exposes no supported CCCD-less subscription API, so the Easee no-CCCD workaround cannot be used by this transport.`,
+          );
+        }
+        throw error;
+      }
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.notification_setup",
+        "completed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          fields: {
+            channel,
+            mode: "subscribed",
+            ...(descriptorCount === undefined ? {} : { descriptorCount }),
+            ...(cccdPresent === undefined ? {} : { cccdPresent }),
+          },
+        },
+      );
     } catch (error) {
-      characteristic.removeListener("data", onData);
-      this.notificationListeners.delete(channel);
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.notification_setup",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          error,
+          fields: {
+            channel,
+            ...(descriptorCount === undefined ? {} : { descriptorCount }),
+            ...(cccdPresent === undefined ? {} : { cccdPresent }),
+          },
+        },
+      );
       throw error;
     }
   }
 
   async write(channel: BluetoothChannel, data: Buffer): Promise<void> {
-    this.assertConnected();
-    const characteristic = this.getCharacteristic(channel);
-    const withoutResponse =
-      characteristic.properties.includes("writeWithoutResponse") &&
-      !characteristic.properties.includes("write");
-    if (
-      !characteristic.properties.includes("write") &&
-      !characteristic.properties.includes("writeWithoutResponse")
-    ) {
-      throw new Error(`BLE ${channel} characteristic does not support writes`);
+    const startedAt = bluetoothDiagnosticNow();
+    const byteLength = Buffer.isBuffer(data) ? data.length : 0;
+    const characteristicUuid = normalizeUuid(
+      BLUETOOTH_CHARACTERISTICS[channel],
+    );
+    let responseMode = "unknown";
+    const disconnectedBeforeWrite =
+      this.disconnected || this.peripheral.state !== "connected";
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.write",
+      "started",
+      {
+        fields: {
+          channel,
+          uuid: characteristicUuid,
+          byteLength,
+          responseMode,
+          disconnectedBeforeWrite,
+        },
+      },
+    );
+    try {
+      this.assertConnected();
+      const characteristic = this.getCharacteristic(channel);
+      const withoutResponse =
+        characteristic.properties.includes("writeWithoutResponse") &&
+        !characteristic.properties.includes("write");
+      responseMode = withoutResponse
+        ? "without_response"
+        : characteristic.properties.includes("write")
+          ? "with_response"
+          : "unsupported";
+      if (
+        !characteristic.properties.includes("write") &&
+        !characteristic.properties.includes("writeWithoutResponse")
+      ) {
+        throw new Error(
+          `BLE ${channel} characteristic does not support writes`,
+        );
+      }
+      await characteristic.writeAsync(Buffer.from(data), withoutResponse);
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.write",
+        "completed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          fields: {
+            channel,
+            uuid: characteristicUuid,
+            byteLength,
+            responseMode,
+            withoutResponse,
+            disconnectedBeforeWrite,
+          },
+        },
+      );
+    } catch (error) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.write",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          error,
+          fields: {
+            channel,
+            uuid: characteristicUuid,
+            byteLength,
+            responseMode,
+            disconnectedBeforeWrite,
+            alreadyDisconnected:
+              this.disconnected || this.peripheral.state !== "connected",
+          },
+        },
+      );
+      throw error;
     }
-    await characteristic.writeAsync(Buffer.from(data), withoutResponse);
   }
 
   onDisconnect(listener: () => void): void {
@@ -324,26 +747,69 @@ class NobleBluetoothLink implements BluetoothLink {
   }
 
   private async close(): Promise<void> {
+    const startedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.disconnect",
+      "started",
+    );
     if (this.disconnected) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.disconnect",
+        "completed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          fields: { alreadyDisconnected: true },
+        },
+      );
       return;
     }
     this.disconnected = true;
     this.peripheral.removeListener("disconnect", this.handleDisconnect);
     const subscriptions = [...this.notificationListeners.entries()];
     this.notificationListeners.clear();
-    await Promise.all(
-      subscriptions.map(async ([channel, onData]) => {
-        const characteristic = this.getCharacteristic(channel);
-        characteristic.removeListener("data", onData);
-        try {
-          await characteristic.unsubscribeAsync();
-        } catch {
-          // A disconnect may already have removed the remote subscription.
-        }
-      }),
-    );
-    if (this.peripheral.state === "connected") {
-      await this.peripheral.disconnectAsync();
+    try {
+      await Promise.all(
+        subscriptions.map(async ([channel, onData]) => {
+          const characteristic = this.getCharacteristic(channel);
+          characteristic.removeListener("data", onData);
+          if (this.passiveNotificationChannels.delete(channel)) {
+            return;
+          }
+          try {
+            await characteristic.unsubscribeAsync();
+          } catch (error) {
+            logBluetoothDiagnostic(
+              this.diagnosticLogger,
+              "transport.notification_teardown",
+              "failed",
+              { error, fields: { channel } },
+            );
+            // A disconnect may already have removed the remote subscription.
+          }
+        }),
+      );
+      if (this.peripheral.state === "connected") {
+        await this.peripheral.disconnectAsync();
+      }
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.disconnect",
+        "completed",
+        { durationMs: bluetoothDiagnosticNow() - startedAt },
+      );
+    } catch (error) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.disconnect",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          error,
+        },
+      );
+      throw error;
     }
   }
 
@@ -361,15 +827,36 @@ class NobleBluetoothLink implements BluetoothLink {
     }
   }
 
-  private readonly handleDisconnect = (): void => {
+  private readonly handleDisconnect = (reason: DisconnectReason): void => {
     if (this.disconnected) {
       return;
     }
     this.disconnected = true;
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.disconnect",
+      "observed",
+      {
+        durationMs: bluetoothDiagnosticNow() - this.connectedAt,
+        fields: {
+          source: "peripheral_event",
+          status: reason,
+          ...(typeof reason === "number"
+            ? {
+                statusDescription: hciStatusMessage(reason).replace(
+                  /[^A-Za-z0-9_.-]+/g,
+                  "_",
+                ),
+              }
+            : {}),
+        },
+      },
+    );
     for (const [channel, onData] of this.notificationListeners) {
       this.getCharacteristic(channel).removeListener("data", onData);
     }
     this.notificationListeners.clear();
+    this.passiveNotificationChannels.clear();
     this.disconnectListener?.();
   };
 }
@@ -382,13 +869,26 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   private cancelDiscovery?: () => void;
   private closed = false;
 
+  /**
+   * Creates a scanner using the selected Noble binding.
+   *
+   * @param noble Initialized Noble instance.
+   * @param binding Binding used to access the local adapter.
+   * @param diagnosticLogger Optional logger for sanitized BLE phase diagnostics.
+   */
   constructor(
     private readonly noble: Noble,
     private readonly binding: NobleBinding = resolveNobleBinding(
       process.platform,
       process.env.NOBLE_BINDINGS,
     ),
+    private readonly diagnosticLogger?: BluetoothDiagnosticLogger,
   ) {}
+
+  /** Returns the Noble binding selected for this scanner. */
+  getBinding(): NobleBinding {
+    return this.binding;
+  }
 
   /** Returns Noble's current local adapter state without starting a scan. */
   getAdapterState(): BluetoothAdapterState {
@@ -422,6 +922,13 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     }
 
     this.discoveryInFlight = true;
+    const discoveryStartedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.discovery",
+      "started",
+      { fields: { timeoutMs } },
+    );
     const deadline = Date.now() + timeoutMs;
     let rejectCancellation: ((error: Error) => void) | undefined;
     let scanDelayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -435,12 +942,44 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       rejectCancellation?.(new Error("BLE discovery cancelled"));
     };
     let onDiscover: ((peripheral: Peripheral) => void) | undefined;
+    let discoveredCount = 0;
+    let discoverySucceeded = false;
     try {
-      await waitForAdapterPoweredOn(
-        this.noble,
-        Math.max(0, deadline - Date.now()),
-        cancelled,
+      const readinessStartedAt = bluetoothDiagnosticNow();
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.adapter_readiness",
+        "started",
+        { fields: { adapterState: this.noble.state } },
       );
+      try {
+        await waitForAdapterPoweredOn(
+          this.noble,
+          Math.max(0, deadline - Date.now()),
+          cancelled,
+        );
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.adapter_readiness",
+          "completed",
+          {
+            durationMs: bluetoothDiagnosticNow() - readinessStartedAt,
+            fields: { adapterState: this.noble.state },
+          },
+        );
+      } catch (error) {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.adapter_readiness",
+          "failed",
+          {
+            durationMs: bluetoothDiagnosticNow() - readinessStartedAt,
+            error,
+            fields: { adapterState: this.noble.state },
+          },
+        );
+        throw error;
+      }
       this.peripherals.clear();
       const discovered = new Map<string, BluetoothCandidate>();
       onDiscover = (peripheral: Peripheral): void => {
@@ -451,16 +990,24 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
         const name = advertisement?.localName;
         const connectable =
           this.binding === "dbus" ? undefined : peripheral.connectable;
+        const matchesManufacturer = hasEaseeManufacturerId(peripheral);
         options?.onAdvertisement?.({
           ...(name ? { name } : {}),
           serviceUuids,
           ...(connectable === undefined ? {} : { connectable }),
+          easeeManufacturerMatch: matchesManufacturer,
         });
         const matchesService = hasService(peripheral, serviceUuid);
         const matchesFallbackName =
           options?.fallbackLocalName !== undefined &&
           name === options.fallbackLocalName;
-        if (!matchesService && !matchesFallbackName) {
+        const matchesManualSignature =
+          options?.scanWithoutServiceFilter === true && matchesManufacturer;
+        if (
+          !matchesService &&
+          !matchesFallbackName &&
+          !matchesManualSignature
+        ) {
           return;
         }
         const id = peripheral.id;
@@ -477,6 +1024,12 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
 
       this.scanning = true;
       this.noble.on("discover", onDiscover);
+      const scanStartStartedAt = bluetoothDiagnosticNow();
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.scan_start",
+        "started",
+      );
       const startScanning = this.noble.startScanningAsync(
         options?.scanWithoutServiceFilter ||
           options?.fallbackLocalName !== undefined
@@ -492,7 +1045,22 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           "Timed out starting BLE discovery",
           cancelled,
         );
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.scan_start",
+          "completed",
+          { durationMs: bluetoothDiagnosticNow() - scanStartStartedAt },
+        );
       } catch (error) {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.scan_start",
+          "failed",
+          {
+            durationMs: bluetoothDiagnosticNow() - scanStartStartedAt,
+            error,
+          },
+        );
         void startScanning.then(
           () => this.noble.stopScanningAsync().catch(() => undefined),
           () => undefined,
@@ -508,7 +1076,21 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           cancelled,
         ]);
       }
-      return [...discovered.values()];
+      const results = [...discovered.values()];
+      discoveredCount = results.length;
+      discoverySucceeded = true;
+      return results;
+    } catch (error) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.discovery",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - discoveryStartedAt,
+          error,
+        },
+      );
+      throw error;
     } finally {
       if (scanDelayTimer) {
         clearTimeout(scanDelayTimer);
@@ -518,7 +1100,42 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       }
       if (this.scanning) {
         this.scanning = false;
-        await this.noble.stopScanningAsync().catch(() => undefined);
+        const scanStopStartedAt = bluetoothDiagnosticNow();
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.scan_stop",
+          "started",
+        );
+        try {
+          await this.noble.stopScanningAsync();
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.scan_stop",
+            "completed",
+            { durationMs: bluetoothDiagnosticNow() - scanStopStartedAt },
+          );
+        } catch (error) {
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.scan_stop",
+            "failed",
+            {
+              durationMs: bluetoothDiagnosticNow() - scanStopStartedAt,
+              error,
+            },
+          );
+        }
+      }
+      if (discoverySucceeded) {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.discovery",
+          "completed",
+          {
+            durationMs: bluetoothDiagnosticNow() - discoveryStartedAt,
+            fields: { candidates: discoveredCount },
+          },
+        );
       }
       this.discoveryInFlight = false;
       this.cancelDiscovery = undefined;
@@ -526,67 +1143,257 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   }
 
   async connect(candidate: BluetoothCandidate): Promise<BluetoothLink> {
-    this.assertOpen();
-    const peripheral = this.peripherals.get(candidate.id);
-    if (!peripheral) {
-      throw new Error("BLE candidate is not from this scanner's discovery");
-    }
-    if (
-      candidate.name &&
-      candidate.name !== peripheral.advertisement.localName
-    ) {
-      throw new Error(
-        "BLE candidate name no longer matches the discovered peripheral",
-      );
-    }
-    if (this.binding !== "dbus" && !peripheral.connectable) {
-      throw new Error("BLE peripheral is not currently connectable");
-    }
-    if (peripheral.state !== "connected") {
-      await peripheral.connectAsync();
-    }
-
-    let characteristics: ReadonlyMap<BluetoothChannel, Characteristic>;
+    const connectStartedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.connect",
+      "started",
+    );
     try {
-      characteristics = await resolveCharacteristics(peripheral);
-    } catch (error) {
-      if (peripheral.state === "connected") {
-        await peripheral.disconnectAsync().catch(() => undefined);
+      this.assertOpen();
+      const peripheral = this.peripherals.get(candidate.id);
+      if (!peripheral) {
+        throw new Error("BLE candidate is not from this scanner's discovery");
       }
+      if (
+        candidate.name &&
+        candidate.name !== peripheral.advertisement.localName
+      ) {
+        throw new Error(
+          "BLE candidate name no longer matches the discovered peripheral",
+        );
+      }
+      if (this.binding !== "dbus" && !peripheral.connectable) {
+        throw new Error("BLE peripheral is not currently connectable");
+      }
+      if (peripheral.state !== "connected") {
+        const linkConnectStartedAt = bluetoothDiagnosticNow();
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.link_connect",
+          "started",
+        );
+        try {
+          await peripheral.connectAsync();
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.link_connect",
+            "completed",
+            {
+              durationMs: bluetoothDiagnosticNow() - linkConnectStartedAt,
+            },
+          );
+        } catch (error) {
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.link_connect",
+            "failed",
+            {
+              durationMs: bluetoothDiagnosticNow() - linkConnectStartedAt,
+              error,
+            },
+          );
+          throw error;
+        }
+      } else {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.link_connect",
+          "reused",
+        );
+      }
+
+      const gattDiscoveryStartedAt = bluetoothDiagnosticNow();
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "gatt.discovery",
+        "started",
+      );
+      let characteristics: ReadonlyMap<BluetoothChannel, Characteristic>;
+      try {
+        characteristics = await resolveCharacteristics(
+          peripheral,
+          this.diagnosticLogger,
+          this.binding === "hci",
+        );
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "gatt.discovery",
+          "completed",
+          {
+            durationMs: bluetoothDiagnosticNow() - gattDiscoveryStartedAt,
+            fields: { characteristics: characteristics.size },
+          },
+        );
+      } catch (error) {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "gatt.discovery",
+          "failed",
+          {
+            durationMs: bluetoothDiagnosticNow() - gattDiscoveryStartedAt,
+            error,
+          },
+        );
+        if (peripheral.state === "connected") {
+          const cleanupStartedAt = bluetoothDiagnosticNow();
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.disconnect",
+            "cleanup_started",
+          );
+          try {
+            await peripheral.disconnectAsync();
+            logBluetoothDiagnostic(
+              this.diagnosticLogger,
+              "transport.disconnect",
+              "cleanup_completed",
+              {
+                durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
+              },
+            );
+          } catch (disconnectError) {
+            logBluetoothDiagnostic(
+              this.diagnosticLogger,
+              "transport.disconnect",
+              "cleanup_failed",
+              {
+                durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
+                error: disconnectError,
+              },
+            );
+          }
+        }
+        throw error;
+      }
+      const pairDevice =
+        this.binding === "dbus"
+          ? async () => {
+              const pairingStartedAt = bluetoothDiagnosticNow();
+              logBluetoothDiagnostic(
+                this.diagnosticLogger,
+                "transport.pairing",
+                "started",
+              );
+              try {
+                await pairBluezDevice(peripheral.address);
+                logBluetoothDiagnostic(
+                  this.diagnosticLogger,
+                  "transport.pairing",
+                  "completed",
+                  {
+                    durationMs: bluetoothDiagnosticNow() - pairingStartedAt,
+                  },
+                );
+              } catch (error) {
+                logBluetoothDiagnostic(
+                  this.diagnosticLogger,
+                  "transport.pairing",
+                  "failed",
+                  {
+                    durationMs: bluetoothDiagnosticNow() - pairingStartedAt,
+                    error,
+                  },
+                );
+                throw error;
+              }
+            }
+          : undefined;
+      const allowCoreBluetoothCccdFallback =
+        this.binding === "mac" ||
+        (this.binding === "default" && process.platform === "darwin");
+      const link = new NobleBluetoothLink(
+        peripheral,
+        characteristics,
+        pairDevice,
+        allowCoreBluetoothCccdFallback,
+        this.binding === "hci",
+        this.diagnosticLogger,
+      );
+      this.activeLinks.add(link);
+      link.onDisconnect(() => this.activeLinks.delete(link));
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.connect",
+        "completed",
+        { durationMs: bluetoothDiagnosticNow() - connectStartedAt },
+      );
+      return link;
+    } catch (error) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.connect",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - connectStartedAt,
+          error,
+        },
+      );
       throw error;
     }
-    const pairDevice =
-      this.binding === "dbus"
-        ? () => pairBluezDevice(peripheral.address)
-        : undefined;
-    const link = new NobleBluetoothLink(
-      peripheral,
-      characteristics,
-      pairDevice,
-    );
-    this.activeLinks.add(link);
-    link.onDisconnect(() => this.activeLinks.delete(link));
-    return link;
   }
 
   async close(): Promise<void> {
+    const startedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.scanner_close",
+      "started",
+    );
     if (this.closed) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.scanner_close",
+        "completed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          fields: { alreadyClosed: true },
+        },
+      );
       return;
     }
     this.closed = true;
-    this.cancelDiscovery?.();
-    if (this.scanning) {
-      this.scanning = false;
-      await this.noble.stopScanningAsync().catch(() => undefined);
+    try {
+      this.cancelDiscovery?.();
+      if (this.scanning) {
+        this.scanning = false;
+        try {
+          await this.noble.stopScanningAsync();
+        } catch (error) {
+          logBluetoothDiagnostic(
+            this.diagnosticLogger,
+            "transport.scan_stop",
+            "failed",
+            { error },
+          );
+        }
+      }
+      await Promise.all(
+        [...this.activeLinks].map((link) =>
+          link.disconnect().catch(() => undefined),
+        ),
+      );
+      this.activeLinks.clear();
+      this.peripherals.clear();
+      this.noble.stop();
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.scanner_close",
+        "completed",
+        { durationMs: bluetoothDiagnosticNow() - startedAt },
+      );
+    } catch (error) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "transport.scanner_close",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - startedAt,
+          error,
+        },
+      );
+      throw error;
     }
-    await Promise.all(
-      [...this.activeLinks].map((link) =>
-        link.disconnect().catch(() => undefined),
-      ),
-    );
-    this.activeLinks.clear();
-    this.peripherals.clear();
-    this.noble.stop();
   }
 
   private assertOpen(): void {
@@ -596,8 +1403,26 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   }
 }
 
+/**
+ * Creates a Noble scanner and binds optional phase diagnostics to the adapter logger.
+ *
+ * @param factory Lazy Noble factory.
+ * @param configuredBinding Optional adapter-selected binding.
+ * @param diagnosticLogger Optional logger for sanitized BLE phase diagnostics.
+ */
 export async function createNobleBluetoothScanner(
   factory: NobleFactory = loadDefaultNoble,
+  configuredBinding?: string,
+  diagnosticLogger?: BluetoothDiagnosticLogger,
 ): Promise<NobleBluetoothScanner> {
-  return new NobleBluetoothScanner(await factory());
+  const binding = resolveNobleBinding(
+    process.platform,
+    configuredBinding,
+    process.env.NOBLE_BINDINGS,
+  );
+  return new NobleBluetoothScanner(
+    await factory(binding),
+    binding,
+    diagnosticLogger,
+  );
 }

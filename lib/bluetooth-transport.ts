@@ -16,6 +16,8 @@ export interface BluetoothAdvertisementReport {
   readonly name?: string;
   readonly serviceUuids: readonly string[];
   readonly connectable?: boolean;
+  /** Whether the advertisement's company identifier is Easee's ID 3118; raw data is not exposed. */
+  readonly easeeManufacturerMatch?: boolean;
 }
 
 /** Optional controls and callbacks for BLE discovery. */

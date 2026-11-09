@@ -230,7 +230,7 @@ describe("manual Bluetooth search", () => {
     ).to.equal(true);
     expect(
       infoMessages.some((message) =>
-        /^Manual Bluetooth search completed in \d+ ms: 2 advertisement\(s\) matched the Easee service UUID\.$/.test(
+        /^Manual Bluetooth search completed in \d+ ms: 2 advertisement\(s\) matched the Easee service UUID or manufacturer ID 3118\.$/.test(
           message,
         ),
       ),
@@ -302,7 +302,9 @@ describe("manual Bluetooth search", () => {
       serial: "EMX123456",
       name: "Garage",
       status: "connecting",
-      error: new Error("Authentication failed for PIN secret-pin"),
+      error: new Error(
+        "Authentication failed for charger EMX123456 at /org/bluez/hci0/dev_58_BF_25_22_05_3A (58:BF:25:22:05:3A) using PIN secret-pin",
+      ),
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -312,11 +314,19 @@ describe("manual Bluetooth search", () => {
     ]
       .map((call) => call.args[0])
       .join(" ");
-    expect(logs).to.contain("Authentication failed for PIN [redacted]");
+    expect(logs).to.contain(
+      "Authentication failed for charger [redacted] at /org/bluez/hci0/dev_[redacted] ([redacted]) using PIN [redacted]",
+    );
     expect(logs).not.to.contain("secret-pin");
-    expect(
-      JSON.stringify(stateWrites.getCalls().map((call) => call.args)),
-    ).not.to.contain("secret-pin");
+    expect(logs).not.to.contain("EMX123456");
+    expect(logs).not.to.contain("58:BF:25:22:05:3A");
+    expect(logs).not.to.contain("dev_58_BF_25_22_05_3A");
+    const states = JSON.stringify(
+      stateWrites.getCalls().map((call) => call.args[1]),
+    );
+    expect(states).not.to.contain("secret-pin");
+    expect(states).not.to.contain("EMX123456");
+    expect(states).not.to.contain("58:BF:25:22:05:3A");
   });
 
   it("reports the local adapter as not ready without starting a search", async () => {
@@ -368,7 +378,7 @@ describe("manual Bluetooth search", () => {
       .map((call) => call.args[0] as string);
     expect(
       infoMessages.some((message) =>
-        /^Manual Bluetooth search completed in \d+ ms: 0 advertisement\(s\) matched the Easee service UUID\.$/.test(
+        /^Manual Bluetooth search completed in \d+ ms: 0 advertisement\(s\) matched the Easee service UUID or manufacturer ID 3118\.$/.test(
           message,
         ),
       ),
@@ -382,6 +392,45 @@ describe("manual Bluetooth search", () => {
     ).to.equal(true);
   });
 
+  it("reports Easee manufacturer-signature matches without exposing advertisement data", async () => {
+    const candidates: BluetoothCandidate[] = [
+      { id: "easee-ble-id", name: "TEST0001", connectable: true },
+    ];
+    const { adapter, scanner, stateWrites } = createHarness(
+      "poweredOn",
+      candidates,
+    );
+    scanner.discover.callsFake(
+      (
+        _serviceUuid: string,
+        _timeoutMs: number,
+        options?: BluetoothDiscoveryOptions,
+      ) => {
+        options?.onAdvertisement?.({
+          name: "TEST0001",
+          serviceUuids: [],
+          connectable: true,
+          easeeManufacturerMatch: true,
+        });
+        return Promise.resolve(candidates);
+      },
+    );
+
+    expect(await adapter.runBluetoothManualScan()).to.deep.equal({
+      result: "completed",
+    });
+    const finalState = lastStateValue(
+      stateWrites,
+      "info.bluetoothScanResults",
+    ) as string;
+    expect(finalState).to.contain("Found 1 matching advertisement");
+    expect(finalState).to.contain(
+      "TEST0001 [connectable; service UUIDs: none; manufacturer ID 3118: match]",
+    );
+    expect(finalState).not.to.contain("manufacturerData");
+    expect(finalState).not.to.contain("de ad");
+  });
+
   it("shows names, connectability and service UUIDs for nonmatching advertisements", async () => {
     const { adapter, scanner, stateWrites } = createHarness("poweredOn", []);
     scanner.discover.callsFake(
@@ -391,7 +440,7 @@ describe("manual Bluetooth search", () => {
         options?: BluetoothDiscoveryOptions,
       ) => {
         options?.onAdvertisement?.({
-          name: "EHLUTXLE",
+          name: "TEST0001",
           serviceUuids: ["180f"],
           connectable: false,
         });
@@ -410,7 +459,7 @@ describe("manual Bluetooth search", () => {
     ) as string;
     expect(finalState).to.contain("Noble observed 1 BLE advertisement(s)");
     expect(finalState).to.contain(
-      "EHLUTXLE [not connectable; service UUIDs: 180f]",
+      "TEST0001 [not connectable; service UUIDs: 180f; manufacturer ID 3118: no match]",
     );
     expect(finalState).not.to.contain("secret-pin");
     expect(
@@ -422,7 +471,7 @@ describe("manual Bluetooth search", () => {
       .map((call) => call.args[0])
       .join(" ");
     expect(infoMessages).to.contain(
-      "EHLUTXLE [not connectable; service UUIDs: 180f]",
+      "TEST0001 [not connectable; service UUIDs: 180f; manufacturer ID 3118: no match]",
     );
     expect(infoMessages).not.to.contain("secret-pin");
     expect(JSON.stringify(adapter.config)).to.equal(originalConfig);
@@ -440,7 +489,7 @@ describe("manual Bluetooth search", () => {
         new Promise<readonly BluetoothCandidate[]>((resolve) => {
           finishSearch = resolve;
           options?.onAdvertisement?.({
-            name: "EHLUTXLE",
+            name: "TEST0001",
             serviceUuids: [],
             connectable: true,
           });
@@ -460,7 +509,7 @@ describe("manual Bluetooth search", () => {
       )
       .map((call) => call.args[1] as string);
     expect(liveResults.at(-1)).to.contain(
-      "EHLUTXLE [connectable; service UUIDs: none]",
+      "TEST0001 [connectable; service UUIDs: none; manufacturer ID 3118: no match]",
     );
     expect(adapter.bluetoothManualScanInFlight).to.equal(true);
     expect(scanner.discover.firstCall.args[1]).to.equal(30000);

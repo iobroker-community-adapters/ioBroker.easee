@@ -58,6 +58,9 @@ class FakeLink implements BluetoothLink {
   pairFailure?: Error;
   pairDelayMs = 0;
   authenticationWriteFailures: Error[] = [];
+  unexpectedHelloChannel?: string;
+  deferHelloWrites = false;
+  private readonly pendingHelloWrites: (() => void)[] = [];
   stateResponses = 0;
   suppressStateAfterInitial = false;
   deferCommands = false;
@@ -106,11 +109,14 @@ class FakeLink implements BluetoothLink {
       return Promise.reject(authenticationWriteFailure);
     }
     if (channel === "hello") {
+      if (this.deferHelloWrites) {
+        return new Promise((resolve) => this.pendingHelloWrites.push(resolve));
+      }
       const round = ++this.successfulHelloWrites;
       if (round === 1) {
         this.clientRoundOne = Buffer.from(data);
         queueMicrotask(() =>
-          this.notify("hello", this.serverHandshake.createRoundOne()),
+          this.notifyHelloResponse(this.serverHandshake.createRoundOne()),
         );
       } else {
         if (!this.clientRoundOne) {
@@ -120,7 +126,7 @@ class FakeLink implements BluetoothLink {
           this.clientRoundOne,
         );
         this.serverKey = this.serverHandshake.acceptRoundTwo(data);
-        queueMicrotask(() => this.notify("hello", serverRoundTwo));
+        queueMicrotask(() => this.notifyHelloResponse(serverRoundTwo));
       }
       return Promise.resolve();
     }
@@ -182,6 +188,24 @@ class FakeLink implements BluetoothLink {
 
   deliverStaleState(): void {
     this.notify("state", frame("state"));
+  }
+
+  deliverNotification(channel: string, data: Buffer): void {
+    this.notify(channel, data);
+  }
+
+  releasePendingHelloWrites(): void {
+    for (const resolve of this.pendingHelloWrites.splice(0)) {
+      resolve();
+    }
+  }
+
+  private notifyHelloResponse(data: Buffer): void {
+    if (this.unexpectedHelloChannel) {
+      this.notify(this.unexpectedHelloChannel, Buffer.from([0xff]));
+      this.unexpectedHelloChannel = undefined;
+    }
+    this.notify("hello", data);
   }
 
   private notify(channel: string, data: Buffer): void {
@@ -350,6 +374,105 @@ describe("Bluetooth client boundary", () => {
     await instance.stop();
   });
 
+  it("logs timed connection phases without identifiers or BLE payloads", async () => {
+    const scanner = new FakeScanner();
+    const diagnostics: string[] = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      {
+        diagnosticLogger: { debug: (message) => diagnostics.push(message) },
+      },
+    );
+
+    await instance.start();
+    await instance.stop();
+
+    const output = diagnostics.join("\n");
+    expect(output).to.include("stage=client.discovery state=started");
+    expect(output).to.match(
+      /stage=client.link_open state=completed durationMs=\d+/,
+    );
+    expect(output).to.include(
+      "stage=client.notification_setup state=completed",
+    );
+    expect(output).to.match(
+      /stage=hello.write state=completed .*durationMs=\d+/,
+    );
+    expect(output).to.match(
+      /stage=hello.response state=completed durationMs=\d+/,
+    );
+    expect(output).to.match(
+      /stage=client.disconnect state=completed durationMs=\d+/,
+    );
+    expect(output).not.to.include("EMX12345");
+    expect(output).not.to.include("1234");
+    expect(output).not.to.include("temporary-device-address");
+  });
+
+  it("matches HELLO notifications and diagnoses unexpected or unsolicited channels", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.unexpectedHelloChannel = "command";
+    const diagnostics: string[] = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      {
+        diagnosticLogger: { debug: (message) => diagnostics.push(message) },
+      },
+    );
+
+    await instance.start();
+    const unsolicitedPayload = Buffer.from("PRIVATE-PAYLOAD");
+    scanner.link.deliverNotification("hello", unsolicitedPayload);
+
+    const output = diagnostics.join("\n");
+    expect(output).to.match(
+      /stage=client\.notification state=ignored channel=command byteLength=1 accepted=false ignoreReason=unexpected_channel pendingChannel=hello/,
+    );
+    expect(output).to.match(
+      /stage=client\.notification state=matched channel=hello byteLength=\d+ accepted=true pendingChannel=hello/,
+    );
+    expect(output).to.match(
+      /stage=client\.notification state=ignored channel=hello byteLength=15 accepted=false ignoreReason=no_pending pendingChannel=none/,
+    );
+    expect(output).not.to.include("PRIVATE-PAYLOAD");
+    await instance.stop();
+  });
+
+  it("reports when a HELLO write is still pending at response timeout and teardown", async () => {
+    const scanner = new FakeScanner();
+    scanner.link.deferHelloWrites = true;
+    const diagnostics: string[] = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      {
+        requestTimeoutMs: 20,
+        discoveryTimeoutMs: 20,
+        setupTimeoutMs: 100,
+        diagnosticLogger: { debug: (message) => diagnostics.push(message) },
+      },
+    );
+
+    await instance.start();
+
+    const exchangeFailure = diagnostics.find(
+      (message) =>
+        message.includes("stage=hello.exchange state=failed") &&
+        message.includes("writeOutcome="),
+    );
+    expect(exchangeFailure).to.include("pendingChannel=hello");
+    expect(exchangeFailure).to.include("writeOutcome=pending");
+    expect(exchangeFailure).to.match(/byteLength=\d+/);
+    expect(exchangeFailure).to.not.include("EMX12345");
+    expect(diagnostics.join("\n")).not.to.include("1234");
+
+    scanner.link.releasePendingHelloWrites();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await instance.stop();
+  });
+
   it("reports generic candidate connection failures such as GATT validation errors", async () => {
     const scanner = new FakeScanner();
     scanner.connectFailure = new Error(
@@ -486,19 +609,28 @@ describe("Bluetooth client boundary", () => {
     await instance.stop();
   });
 
-  it("surfaces a BlueZ pairing failure without retrying the write", async () => {
+  it("surfaces pairing error metadata without logging the pairing message or credentials", async () => {
     const scanner = new FakeScanner();
     scanner.link.authenticationWriteFailures.push(
       new Error("org.bluez.Error.NotAuthorized: Insufficient Authentication"),
     );
-    scanner.link.pairFailure = new Error(
-      "BlueZ pairing failed: org.bluez.Error.AuthenticationCanceled",
+    const pairingError = new Error(
+      "BlueZ pairing failed for EMX12345; PIN 1234; address 58:BF:25:22:05:3A",
     );
+    Object.assign(pairingError, {
+      code: "org.bluez.Error.AuthenticationCanceled",
+      status: 5,
+    });
+    scanner.link.pairFailure = pairingError;
+    const diagnostics: string[] = [];
     const statuses: Array<{ status: string; error?: Error }> = [];
     const instance = new BluetoothClient(
       [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
       scanner,
-      { onStatus: (event) => statuses.push(event) },
+      {
+        diagnosticLogger: { debug: (message) => diagnostics.push(message) },
+        onStatus: (event) => statuses.push(event),
+      },
     );
 
     await instance.start();
@@ -510,7 +642,18 @@ describe("Bluetooth client boundary", () => {
     expect(
       statuses.find((event) => event.status === "connecting" && event.error)
         ?.error?.message,
-    ).to.equal("BlueZ pairing failed: org.bluez.Error.AuthenticationCanceled");
+    ).to.equal(
+      "BlueZ pairing failed for EMX12345; PIN 1234; address 58:BF:25:22:05:3A",
+    );
+    const output = diagnostics.join("\n");
+    expect(output).to.include("stage=security.pairing state=failed");
+    expect(output).to.include(
+      "errorCode=org.bluez.Error.AuthenticationCanceled",
+    );
+    expect(output).to.include("errorStatus=5");
+    expect(output).not.to.include("EMX12345");
+    expect(output).not.to.include("1234");
+    expect(output).not.to.include("58:BF:25:22:05:3A");
     await instance.stop();
   });
 

@@ -45,5 +45,9 @@
     "The local Bluetooth adapter is not ready.": "本地蓝牙适配器尚未就绪。",
     "Bluetooth is busy with connection, polling, or a write operation; try again shortly.": "蓝牙正在进行连接、轮询或写入操作，请稍后重试。",
     "Bluetooth search failed. Check adapter access and logs.": "蓝牙搜索失败。请检查适配器访问权限和日志。",
-    "This reports only the local adapter state. poweredOn means the adapter reports ready, but access restrictions can still prevent a scan; it does not mean a charger is nearby, discoverable, authenticated, or connected.": "此处仅报告本地适配器状态。poweredOn 表示适配器报告已就绪，但访问限制仍可能阻止扫描；这并不表示附近有充电器、可被发现、已通过身份验证或已连接。"
+    "This reports only the local adapter state. poweredOn means the adapter reports ready, but access restrictions can still prevent a scan; it does not mean a charger is nearby, discoverable, authenticated, or connected.": "此处仅报告本地适配器状态。poweredOn 表示适配器报告已就绪，但访问限制仍可能阻止扫描；这并不表示附近有充电器、可被发现、已通过身份验证或已连接。",
+    "Bluetooth binding": "蓝牙绑定",
+    "BlueZ D-Bus": "BlueZ D-Bus",
+    "Raw HCI": "原始 HCI",
+    "Automatic uses the platform default and honors NOBLE_BINDINGS. On Linux, Raw HCI requires CAP_NET_RAW and may conflict with BlueZ or other Bluetooth clients.": "自动模式使用平台默认设置并遵循 NOBLE_BINDINGS。在 Linux 上，Raw HCI 需要 CAP_NET_RAW，并可能与 BlueZ 或其他蓝牙客户端冲突。"
 }

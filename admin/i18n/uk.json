@@ -45,5 +45,9 @@
     "The local Bluetooth adapter is not ready.": "Локальний адаптер Bluetooth не готовий.",
     "Bluetooth is busy with connection, polling, or a write operation; try again shortly.": "Bluetooth зайнятий підключенням, опитуванням або записом; спробуйте пізніше.",
     "Bluetooth search failed. Check adapter access and logs.": "Не вдалося виконати пошук Bluetooth. Перевірте доступ до адаптера та журнали.",
-    "This reports only the local adapter state. poweredOn means the adapter reports ready, but access restrictions can still prevent a scan; it does not mean a charger is nearby, discoverable, authenticated, or connected.": "Тут показано лише стан локального адаптера. poweredOn означає, що адаптер повідомляє про готовність, але обмеження доступу все одно можуть завадити скануванню; це не означає, що зарядний пристрій поруч, доступний для виявлення, автентифікований або підключений."
+    "This reports only the local adapter state. poweredOn means the adapter reports ready, but access restrictions can still prevent a scan; it does not mean a charger is nearby, discoverable, authenticated, or connected.": "Тут показано лише стан локального адаптера. poweredOn означає, що адаптер повідомляє про готовність, але обмеження доступу все одно можуть завадити скануванню; це не означає, що зарядний пристрій поруч, доступний для виявлення, автентифікований або підключений.",
+    "Bluetooth binding": "Режим Bluetooth",
+    "BlueZ D-Bus": "BlueZ D-Bus",
+    "Raw HCI": "Raw HCI",
+    "Automatic uses the platform default and honors NOBLE_BINDINGS. On Linux, Raw HCI requires CAP_NET_RAW and may conflict with BlueZ or other Bluetooth clients.": "Автоматичний режим використовує налаштування платформи та враховує NOBLE_BINDINGS. У Linux Raw HCI потребує CAP_NET_RAW і може конфліктувати з BlueZ або іншими клієнтами Bluetooth."
 }

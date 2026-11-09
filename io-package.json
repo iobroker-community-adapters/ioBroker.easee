@@ -193,6 +193,7 @@
   ],
   "native": {
     "connectionMode": "cloud",
+    "bluetoothBinding": "auto",
     "username": "+49",
     "client_secret": "",
     "polltime": 30,

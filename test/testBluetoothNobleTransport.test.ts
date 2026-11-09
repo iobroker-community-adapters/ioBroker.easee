@@ -12,6 +12,7 @@ import {
   BLUETOOTH_SERVICE_UUID,
 } from "../lib/bluetooth-protocol.ts";
 import type { BluetoothChannel } from "../lib/bluetooth-protocol.ts";
+import type { BluetoothDiagnosticLogger } from "../lib/bluetooth-diagnostics.ts";
 import {
   createNobleBluetoothScanner,
   NobleBluetoothScanner,
@@ -38,7 +39,11 @@ class FakeCharacteristic extends EventEmitter {
   readonly writes: { data: Buffer; withoutResponse: boolean }[] = [];
   subscriptions = 0;
   unsubscriptions = 0;
+  descriptorDiscoveries = 0;
+  descriptorUuids = ["2902"];
   failSubscribe = false;
+  subscribeError?: Error;
+  onSubscribe?: () => void;
 
   constructor(
     readonly uuid: string,
@@ -49,6 +54,10 @@ class FakeCharacteristic extends EventEmitter {
 
   subscribeAsync(): Promise<void> {
     this.subscriptions++;
+    this.onSubscribe?.();
+    if (this.subscribeError) {
+      return Promise.reject(this.subscribeError);
+    }
     if (this.failSubscribe) {
       return Promise.reject(new Error("subscribe refused"));
     }
@@ -60,6 +69,11 @@ class FakeCharacteristic extends EventEmitter {
     return Promise.resolve();
   }
 
+  discoverDescriptorsAsync(): Promise<{ uuid: string }[]> {
+    this.descriptorDiscoveries++;
+    return Promise.resolve(this.descriptorUuids.map((uuid) => ({ uuid })));
+  }
+
   writeAsync(data: Buffer, withoutResponse: boolean): Promise<void> {
     this.writes.push({ data, withoutResponse });
     return Promise.resolve();
@@ -68,6 +82,8 @@ class FakeCharacteristic extends EventEmitter {
 
 class FakeService extends EventEmitter {
   requestedCharacteristics: string[] = [];
+  discoveryCalls = 0;
+  discoveryResults: FakeCharacteristic[][] = [];
   characteristics: FakeCharacteristic[];
 
   constructor(
@@ -79,9 +95,12 @@ class FakeService extends EventEmitter {
   }
 
   discoverCharacteristicsAsync(uuids: string[]): Promise<FakeCharacteristic[]> {
+    this.discoveryCalls++;
     this.requestedCharacteristics = uuids;
+    const characteristics =
+      this.discoveryResults.shift() ?? this.characteristics;
     return Promise.resolve(
-      this.characteristics.filter((characteristic) =>
+      characteristics.filter((characteristic) =>
         uuids.includes(characteristic.uuid.toLowerCase().replace(/-/g, "")),
       ),
     );
@@ -101,6 +120,7 @@ class FakePeripheral extends EventEmitter {
     readonly advertisement: {
       localName: string;
       serviceUuids: string[];
+      manufacturerData?: Buffer;
     },
     services: FakeService[],
   ) {
@@ -196,6 +216,7 @@ function makePeripheral(
     readonly serviceUuids?: string[];
     readonly serviceUuid?: string;
     readonly connectable?: boolean;
+    readonly manufacturerData?: Buffer;
     readonly characteristicUuids?: string[];
   } = {},
 ): {
@@ -219,6 +240,9 @@ function makePeripheral(
       serviceUuids: options.serviceUuids ?? [
         BLUETOOTH_SERVICE_UUID.replace(/-/g, ""),
       ],
+      ...(options.manufacturerData
+        ? { manufacturerData: options.manufacturerData }
+        : {}),
     },
     [service],
   );
@@ -228,9 +252,14 @@ function makePeripheral(
 
 function scanner(
   noble: FakeNoble,
-  binding: "hci" | "dbus" = "hci",
+  binding: "hci" | "dbus" | "mac" = "hci",
+  diagnosticLogger?: BluetoothDiagnosticLogger,
 ): NobleBluetoothScanner {
-  return new NobleBluetoothScanner(noble as unknown as Noble, binding);
+  return new NobleBluetoothScanner(
+    noble as unknown as Noble,
+    binding,
+    diagnosticLogger,
+  );
 }
 
 function fakeBluezBus(
@@ -308,12 +337,16 @@ describe("BlueZ pairing", () => {
 });
 
 describe("Noble Bluetooth transport", () => {
-  it("uses BlueZ D-Bus by default on Linux and preserves explicit binding overrides", () => {
+  it("uses BlueZ D-Bus by default on Linux and preserves binding precedence", () => {
     expect(resolveNobleBinding("linux")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "hci")).to.equal("hci");
     expect(resolveNobleBinding("linux", "dbus")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "default")).to.equal("dbus");
+    expect(resolveNobleBinding("linux", "auto")).to.equal("dbus");
+    expect(resolveNobleBinding("linux", "auto", "hci")).to.equal("hci");
+    expect(resolveNobleBinding("linux", "hci", "dbus")).to.equal("hci");
     expect(resolveNobleBinding("darwin")).to.equal("default");
+    expect(scanner(new FakeNoble(), "hci").getBinding()).to.equal("hci");
   });
 
   it("loads Noble lazily through withBindings only when its factory is called", async () => {
@@ -326,6 +359,19 @@ describe("Noble Bluetooth transport", () => {
     expect(factoryCalls).to.equal(1);
     await transport.close();
     expect(noble.stopped).to.equal(1);
+  });
+
+  it("passes the selected binding to Noble and reports it on the scanner", async () => {
+    const noble = new FakeNoble();
+    let selectedBinding: string | undefined;
+    const transport = await createNobleBluetoothScanner((binding) => {
+      selectedBinding = binding;
+      return Promise.resolve(noble as unknown as Noble);
+    }, "hci");
+
+    expect(selectedBinding).to.equal("hci");
+    expect(transport.getBinding()).to.equal("hci");
+    await transport.close();
   });
 
   it("performs finite UUID-filtered discovery and removes its event listener", async () => {
@@ -359,13 +405,14 @@ describe("Noble Bluetooth transport", () => {
       id: "unrelated-device-address",
       serviceUuids: ["180f"],
     });
-    unrelated.peripheral.advertisement.localName = "EHLUTXLE";
+    unrelated.peripheral.advertisement.localName = "TEST0001";
     noble.discoverOnScan = [matching.peripheral, unrelated.peripheral];
     const transport = scanner(noble);
     const reports: {
       name?: string;
       serviceUuids: readonly string[];
       connectable?: boolean;
+      easeeManufacturerMatch?: boolean;
     }[] = [];
 
     const candidates = await transport.discover(BLUETOOTH_SERVICE_UUID, 20, {
@@ -383,13 +430,76 @@ describe("Noble Bluetooth transport", () => {
         name: "Easee charger",
         serviceUuids: [BLUETOOTH_SERVICE_UUID.replace(/-/g, "")],
         connectable: true,
+        easeeManufacturerMatch: false,
       },
-      { name: "EHLUTXLE", serviceUuids: ["180f"], connectable: true },
+      {
+        name: "TEST0001",
+        serviceUuids: ["180f"],
+        connectable: true,
+        easeeManufacturerMatch: false,
+      },
     ]);
     expect(JSON.stringify(reports)).not.to.contain("unrelated-device-address");
     expect(noble.listenerCount("discover")).to.equal(0);
     expect(noble.stopScanningCount).to.equal(1);
     await transport.close();
+  });
+
+  it("matches Easee manufacturer data in unfiltered searches without exposing its payload", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral({
+      id: "easee-manufacturer-device",
+      serviceUuids: [],
+      manufacturerData: Buffer.from([0x2e, 0x0c, 0xde, 0xad]),
+    });
+    fixture.peripheral.advertisement.localName = "TEST0001";
+    noble.discoverOnScan = [fixture.peripheral];
+    const transport = scanner(noble);
+    const reports: {
+      name?: string;
+      serviceUuids: readonly string[];
+      connectable?: boolean;
+      easeeManufacturerMatch?: boolean;
+    }[] = [];
+
+    const candidates = await transport.discover(BLUETOOTH_SERVICE_UUID, 20, {
+      scanWithoutServiceFilter: true,
+      onAdvertisement: (report) => reports.push(report),
+    });
+
+    expect(candidates).to.deep.equal([
+      {
+        id: "easee-manufacturer-device",
+        name: "TEST0001",
+        connectable: true,
+      },
+    ]);
+    expect(reports).to.deep.equal([
+      {
+        name: "TEST0001",
+        serviceUuids: [],
+        connectable: true,
+        easeeManufacturerMatch: true,
+      },
+    ]);
+    expect(JSON.stringify(reports)).not.to.contain("dead");
+    await transport.close();
+
+    const autoNoble = new FakeNoble();
+    const otherName = makePeripheral({
+      id: "easee-without-configured-name",
+      serviceUuids: [],
+      manufacturerData: Buffer.from([0x2e, 0x0c, 0xde, 0xad]),
+    });
+    otherName.peripheral.advertisement.localName = "OTHERDEVICE";
+    autoNoble.discoverOnScan = [otherName.peripheral];
+    const autoTransport = scanner(autoNoble);
+    expect(
+      await autoTransport.discover(BLUETOOTH_SERVICE_UUID, 20, {
+        fallbackLocalName: "TEST0001",
+      }),
+    ).to.deep.equal([]);
+    await autoTransport.close();
   });
 
   it("reports connectability as unknown for the BlueZ D-Bus binding", async () => {
@@ -399,24 +509,31 @@ describe("Noble Bluetooth transport", () => {
       serviceUuids: [],
       connectable: false,
     });
-    fixture.peripheral.advertisement.localName = "EHLUTXLE";
+    fixture.peripheral.advertisement.localName = "TEST0001";
     noble.discoverOnScan = [fixture.peripheral];
     const transport = scanner(noble, "dbus");
     const reports: {
       name?: string;
       serviceUuids: readonly string[];
       connectable?: boolean;
+      easeeManufacturerMatch?: boolean;
     }[] = [];
 
     const candidates = await transport.discover(BLUETOOTH_SERVICE_UUID, 20, {
-      fallbackLocalName: "EHLUTXLE",
+      fallbackLocalName: "TEST0001",
       onAdvertisement: (report) => reports.push(report),
     });
 
     expect(candidates).to.deep.equal([
-      { id: "serial-peripheral", name: "EHLUTXLE" },
+      { id: "serial-peripheral", name: "TEST0001" },
     ]);
-    expect(reports).to.deep.equal([{ name: "EHLUTXLE", serviceUuids: [] }]);
+    expect(reports).to.deep.equal([
+      {
+        name: "TEST0001",
+        serviceUuids: [],
+        easeeManufacturerMatch: false,
+      },
+    ]);
     const link = await transport.connect(candidates[0]);
     expect(link.pair).to.be.a("function");
     await link.disconnect();
@@ -430,23 +547,23 @@ describe("Noble Bluetooth transport", () => {
       id: "serial-peripheral",
       serviceUuids: [],
     });
-    matching.peripheral.advertisement.localName = "EHLUTXLE";
+    matching.peripheral.advertisement.localName = "TEST0001";
     const similar = makePeripheral({
       id: "similar-peripheral",
       serviceUuids: [],
     });
-    similar.peripheral.advertisement.localName = "EHLUTXLE-2";
+    similar.peripheral.advertisement.localName = "TEST0001-2";
     noble.discoverOnScan = [matching.peripheral, similar.peripheral];
     const transport = scanner(noble);
 
     const candidates = await transport.discover(BLUETOOTH_SERVICE_UUID, 20, {
-      fallbackLocalName: "EHLUTXLE",
+      fallbackLocalName: "TEST0001",
     });
 
     expect(noble.scanFilters).to.deep.equal([[]]);
     expect(noble.allowDuplicates).to.deep.equal([true]);
     expect(candidates).to.deep.equal([
-      { id: "serial-peripheral", name: "EHLUTXLE", connectable: true },
+      { id: "serial-peripheral", name: "TEST0001", connectable: true },
     ]);
     const link = await transport.connect(candidates[0]);
     await link.disconnect();
@@ -461,16 +578,16 @@ describe("Noble Bluetooth transport", () => {
       serviceUuids: [],
       connectable: false,
     });
-    fixture.peripheral.advertisement.localName = "EHLUTXLE";
+    fixture.peripheral.advertisement.localName = "TEST0001";
     noble.discoverOnScan = [fixture.peripheral];
     const transport = scanner(noble);
 
     const candidates = await transport.discover(BLUETOOTH_SERVICE_UUID, 20, {
-      fallbackLocalName: "EHLUTXLE",
+      fallbackLocalName: "TEST0001",
     });
 
     expect(candidates).to.deep.equal([
-      { id: "non-connectable-serial", name: "EHLUTXLE", connectable: false },
+      { id: "non-connectable-serial", name: "TEST0001", connectable: false },
     ]);
     await expectRejectedWithMessage(
       transport.connect(candidates[0]),
@@ -487,12 +604,12 @@ describe("Noble Bluetooth transport", () => {
       serviceUuid: "180f",
       serviceUuids: [],
     });
-    fixture.peripheral.advertisement.localName = "EHLUTXLE";
+    fixture.peripheral.advertisement.localName = "TEST0001";
     noble.discoverOnScan = [fixture.peripheral];
     const transport = scanner(noble);
 
     const candidates = await transport.discover(BLUETOOTH_SERVICE_UUID, 20, {
-      fallbackLocalName: "EHLUTXLE",
+      fallbackLocalName: "TEST0001",
     });
 
     expect(candidates).to.have.length(1);
@@ -530,17 +647,18 @@ describe("Noble Bluetooth transport", () => {
     const link = await transport.connect({ id: fixture.peripheral.id });
     expect(link.pair).to.equal(undefined);
     const received: Buffer[] = [];
-
-    await link.subscribe("hello", (data) => received.push(data));
     const hello = fixture.characteristics.find(
       (characteristic) =>
         characteristic.uuid === BLUETOOTH_CHARACTERISTICS.hello,
     )!;
+    hello.onSubscribe = () => hello.emit("data", Buffer.from([0]), true);
+
+    await link.subscribe("hello", (data) => received.push(data));
     hello.emit("data", Buffer.from([1, 2, 3]), true);
     hello.emit("data", Buffer.from([9]), false);
     await link.write("hello", Buffer.from([4, 5]));
 
-    expect(received).to.deep.equal([Buffer.from([1, 2, 3])]);
+    expect(received).to.deep.equal([Buffer.from([0]), Buffer.from([1, 2, 3])]);
     expect(hello.writes).to.deep.equal([
       { data: Buffer.from([4, 5]), withoutResponse: false },
     ]);
@@ -556,6 +674,266 @@ describe("Noble Bluetooth transport", () => {
     await link.disconnect();
     expect(hello.unsubscriptions).to.equal(1);
     expect(fixture.peripheral.disconnectCount).to.equal(1);
+    await transport.close();
+  });
+
+  it("logs timed GATT and disconnect stages without BLE identifiers or payloads", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral({ id: "58:BF:25:22:05:3A" });
+    fixture.peripheral.advertisement.localName = "EMX12345";
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
+    const [candidate] = await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect(candidate);
+
+    await link.subscribe("hello", () => undefined);
+    await link.write("hello", Buffer.from("sensitive hello payload"));
+    await link.disconnect();
+    await transport.close();
+
+    const output = diagnostics.join("\n");
+    expect(output).to.include("stage=transport.discovery state=completed");
+    expect(output).to.include("stage=transport.link_connect state=completed");
+    expect(output).to.include("stage=gatt.service_discovery state=completed");
+    expect(output).to.include(
+      "stage=gatt.characteristic_discovery state=completed",
+    );
+    expect(output).to.include(
+      "stage=transport.notification_setup state=completed",
+    );
+    expect(output).to.include("stage=transport.write state=completed");
+    expect(output).to.match(
+      /stage=gatt.characteristic_resolved state=completed channel=hello uuid=[a-f0-9]+ notify=true indicate=false write=true writeWithoutResponse=false/,
+    );
+    expect(output).to.match(
+      /channel=hello uuid=[a-f0-9]+ byteLength=23 responseMode=with_response withoutResponse=false disconnectedBeforeWrite=false/,
+    );
+    expect(output).to.include(
+      "stage=transport.cccd_discovery state=completed channel=hello descriptorCount=1 cccdPresent=true",
+    );
+    expect(output).to.match(
+      /stage=transport.disconnect state=completed durationMs=\d+/,
+    );
+    expect(output).not.to.include("58:BF:25:22:05:3A");
+    expect(output).not.to.include("EMX12345");
+    expect(output).not.to.include("sensitive hello payload");
+  });
+
+  it("logs raw characteristic event metadata and third-argument errors without payloads", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect({ id: fixture.peripheral.id });
+    const hello = fixture.characteristics.find(
+      (characteristic) =>
+        characteristic.uuid === BLUETOOTH_CHARACTERISTICS.hello,
+    )!;
+    const received: Buffer[] = [];
+    const privatePayload = Buffer.from("PRIVATE-ATT-PAYLOAD");
+
+    await link.subscribe("hello", (data) => received.push(data));
+    hello.emit(
+      "data",
+      privatePayload,
+      true,
+      new Error("ATT notification failed for TEST0001, PIN 1234"),
+    );
+    hello.emit("data", Buffer.from("IGNORED-DATA"), false);
+
+    expect(received).to.deep.equal([privatePayload]);
+    const output = diagnostics.join("\n");
+    expect(output).to.include(
+      "stage=transport.cccd_discovery state=completed channel=hello descriptorCount=1 cccdPresent=true",
+    );
+    expect(output).to.match(
+      /stage=transport.characteristic_data state=accepted channel=hello uuid=[a-f0-9]+ byteLength=19 isNotification=true accepted=true .*errorCategory=att_notification_error/,
+    );
+    expect(output).to.match(
+      /stage=transport.characteristic_data state=ignored channel=hello uuid=[a-f0-9]+ byteLength=12 isNotification=false accepted=false ignoreReason=not_notification/,
+    );
+    expect(output).not.to.include("PRIVATE-ATT-PAYLOAD");
+    expect(output).not.to.include("IGNORED-DATA");
+    expect(output).not.to.include("TEST0001");
+    expect(output).not.to.include("1234");
+
+    await link.disconnect();
+    await transport.close();
+  });
+
+  it("logs whether a failed write was already disconnected without payloads", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect({ id: fixture.peripheral.id });
+    const hello = fixture.characteristics.find(
+      (characteristic) =>
+        characteristic.uuid === BLUETOOTH_CHARACTERISTICS.hello,
+    )!;
+    hello.writeAsync = () => {
+      fixture.peripheral.state = "disconnected";
+      fixture.peripheral.emit("disconnect", 0);
+      return Promise.reject(
+        new Error("write failed for TEST0001 PIN 1234 PRIVATE-WRITE"),
+      );
+    };
+
+    await expectRejectedWithMessage(
+      link.write("hello", Buffer.from("PRIVATE-WRITE")),
+      "write failed",
+    );
+
+    const output = diagnostics.join("\n");
+    expect(output).to.match(
+      /stage=transport.write state=failed channel=hello uuid=2f7b83dbae66d0beae4578ecf4509b3d byteLength=13 responseMode=with_response disconnectedBeforeWrite=false alreadyDisconnected=true/,
+    );
+    expect(output).not.to.include("PRIVATE-WRITE");
+    expect(output).not.to.include("TEST0001");
+    expect(output).not.to.include("1234");
+
+    await link.disconnect();
+    await transport.close();
+  });
+
+  it("logs the Noble disconnect status without identifying the peripheral", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral({ id: "58:BF:25:22:05:3A" });
+    fixture.peripheral.advertisement.localName = "EMX12345";
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
+    const [candidate] = await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    await transport.connect(candidate);
+
+    fixture.peripheral.state = "disconnected";
+    fixture.peripheral.emit("disconnect", 0x3e);
+
+    const output = diagnostics.join("\n");
+    expect(output).to.include(
+      "stage=transport.disconnect state=observed source=peripheral_event status=62 statusDescription=Connection_Failed_to_be_Established",
+    );
+    expect(output).not.to.include("58:BF:25:22:05:3A");
+    expect(output).not.to.include("EMX12345");
+    await transport.close();
+  });
+
+  it("retains the CoreBluetooth callback after a CCCD subscription error", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const transport = scanner(noble, "mac");
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect({ id: fixture.peripheral.id });
+    const hello = fixture.characteristics.find(
+      (characteristic) =>
+        characteristic.uuid === BLUETOOTH_CHARACTERISTICS.hello,
+    )!;
+    hello.subscribeError = new Error("The attribute could not be found");
+    const received: Buffer[] = [];
+
+    await link.subscribe("hello", (data) => received.push(data));
+    expect(hello.listenerCount("data")).to.equal(1);
+
+    hello.emit("data", Buffer.from([7, 8]), false);
+    expect(received).to.deep.equal([Buffer.from([7, 8])]);
+
+    const command = fixture.characteristics.find(
+      (characteristic) =>
+        characteristic.uuid === BLUETOOTH_CHARACTERISTICS.command,
+    )!;
+    command.subscribeError = new Error("subscribe refused");
+    await expectRejectedWithMessage(
+      link.subscribe("command", () => undefined),
+      "subscribe refused",
+    );
+    expect(command.listenerCount("data")).to.equal(0);
+
+    await link.disconnect();
+    expect(hello.listenerCount("data")).to.equal(0);
+    expect(hello.unsubscriptions).to.equal(1);
+    await transport.close();
+  });
+
+  it("explains when BlueZ D-Bus cannot subscribe without a CCCD", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const transport = scanner(noble, "dbus");
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect({ id: fixture.peripheral.id });
+    const hello = fixture.characteristics.find(
+      (characteristic) =>
+        characteristic.uuid === BLUETOOTH_CHARACTERISTICS.hello,
+    )!;
+    hello.subscribeError = new Error("The attribute could not be found");
+    const received: Buffer[] = [];
+
+    await expectRejectedWithMessage(
+      link.subscribe("hello", (data) => received.push(data)),
+      "This Noble binding exposes no supported CCCD-less subscription API",
+    );
+
+    expect(hello.descriptorDiscoveries).to.equal(0);
+    expect(hello.subscriptions).to.equal(1);
+    expect(hello.listenerCount("data")).to.equal(0);
+    hello.emit("data", Buffer.from([1]), true);
+    expect(received).to.deep.equal([]);
+    await link.disconnect();
+    await transport.close();
+  });
+
+  it("receives HCI notifications without a CCCD without subscribing or unsubscribing", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect({ id: fixture.peripheral.id });
+    const hello = fixture.characteristics.find(
+      (characteristic) =>
+        characteristic.uuid === BLUETOOTH_CHARACTERISTICS.hello,
+    )!;
+    hello.descriptorUuids = [];
+    const received: Buffer[] = [];
+
+    await link.subscribe("hello", (data) => received.push(data));
+    expect(hello.descriptorDiscoveries).to.equal(1);
+    expect(hello.subscriptions).to.equal(0);
+    expect(diagnostics.join("\n")).to.include(
+      "stage=transport.cccd_discovery state=completed channel=hello descriptorCount=0 cccdPresent=false",
+    );
+
+    hello.emit("data", Buffer.from([7, 8]), true);
+    hello.emit("data", Buffer.from([9]), false);
+    expect(received).to.deep.equal([Buffer.from([7, 8])]);
+
+    await link.disconnect();
+    expect(hello.listenerCount("data")).to.equal(0);
+    expect(hello.unsubscriptions).to.equal(0);
     await transport.close();
   });
 
@@ -599,7 +977,79 @@ describe("Noble Bluetooth transport", () => {
     await transport.close();
   });
 
-  it("disconnects when a requested GATT characteristic is missing", async () => {
+  it("recovers from incomplete first HCI characteristic discovery", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    fixture.service.discoveryResults = [
+      fixture.characteristics.slice(1),
+      fixture.characteristics,
+    ];
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+
+    const startedAt = Date.now();
+    const link = await transport.connect({ id: fixture.peripheral.id });
+
+    expect(fixture.service.discoveryCalls).to.equal(2);
+    expect(Date.now() - startedAt).to.be.at.least(200);
+    expect(diagnostics.join("\n")).to.include(
+      "stage=gatt.characteristic_discovery state=retry attempt=1 missingCount=1 quietWindowMs=250",
+    );
+    await link.disconnect();
+    await transport.close();
+  });
+
+  it("does not retry incomplete characteristic discovery on non-HCI bindings", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    fixture.service.discoveryResults = [
+      fixture.characteristics.slice(1),
+      fixture.characteristics,
+    ];
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "dbus", {
+      debug: (message) => diagnostics.push(message),
+    });
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+
+    const startedAt = Date.now();
+    await expectRejectedWithMessage(
+      transport.connect({ id: fixture.peripheral.id }),
+      "Expected exactly one BLE characteristic",
+    );
+
+    expect(fixture.service.discoveryCalls).to.equal(1);
+    expect(Date.now() - startedAt).to.be.lessThan(200);
+    expect(diagnostics.join("\n")).not.to.include("state=retry");
+    expect(fixture.peripheral.disconnectCount).to.equal(1);
+    await transport.close();
+  });
+
+  it("does not delay complete HCI characteristic discovery", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const transport = scanner(noble, "hci");
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+
+    const startedAt = Date.now();
+    const link = await transport.connect({ id: fixture.peripheral.id });
+
+    expect(fixture.service.discoveryCalls).to.equal(1);
+    expect(Date.now() - startedAt).to.be.lessThan(200);
+    await link.disconnect();
+    await transport.close();
+  });
+
+  it("reports a second incomplete HCI characteristic discovery and disconnects", async () => {
     const noble = new FakeNoble();
     const fixture = makePeripheral({
       characteristicUuids: Object.values(BLUETOOTH_CHARACTERISTICS).filter(
@@ -608,13 +1058,23 @@ describe("Noble Bluetooth transport", () => {
     });
     noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
     noble.discoverOnScan = [fixture.peripheral];
-    const transport = scanner(noble);
+    const diagnostics: string[] = [];
+    const transport = scanner(noble, "hci", {
+      debug: (message) => diagnostics.push(message),
+    });
     await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
 
     await expectRejectedWithMessage(
       transport.connect({ id: fixture.peripheral.id }),
       "Expected exactly one BLE characteristic",
     );
+
+    expect(fixture.service.discoveryCalls).to.equal(2);
+    const retryFailure = diagnostics.find((message) =>
+      message.includes("state=retry_failed"),
+    );
+    expect(retryFailure).to.include("attempt=2 missingCount=1");
+    expect(retryFailure).to.include("errorName=Error");
     expect(fixture.peripheral.disconnectCount).to.equal(1);
     await transport.close();
   });

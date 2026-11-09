@@ -219,6 +219,67 @@ describe("Bluetooth charger Device Manager", () => {
     expect(adapter.encrypt.calledWithExactly("1234")).to.equal(true);
   });
 
+  it("shows a redacted field-specific warning for an undecryptable saved charger", () => {
+    const { adapter, manager } = createHarness({
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX123456",
+          pin: "easee:v1:stored-ciphertext-secret",
+          name: "Garage",
+        },
+      ],
+      bluetoothChargerListManaged: true,
+    });
+    adapter.decrypt.throws(new Error("decrypt-error-secret"));
+
+    const devices = manager.getDevices();
+    expect(devices).to.have.length(1);
+    expect(devices[0].name).to.deep.include({
+      en: "Bluetooth configuration error: Stored Bluetooth charger entry 1 field pin could not be decrypted.",
+      de: "Fehler in der Bluetooth-Konfiguration: Der PIN in Eintrag 1, Feld pin, der gespeicherten Bluetooth-Konfiguration konnte nicht entschlüsselt werden.",
+    });
+    const output = JSON.stringify({ devices, logs: adapter.log });
+    expect(output).not.to.include("stored-ciphertext-secret");
+    expect(output).not.to.include("decrypt-error-secret");
+  });
+
+  it("reports a stored configuration failure when it blocks the first add", async () => {
+    const { adapter, manager } = createHarness({
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX123456",
+          pin: "easee:v1:stored-ciphertext-secret",
+          name: "Garage",
+        },
+      ],
+      bluetoothChargerListManaged: true,
+    });
+    adapter.decrypt.throws(new Error("decrypt-error-secret"));
+    const context = {
+      showForm: sinon.stub().resolves({
+        serialNumber: "EMX654321",
+        pin: "new-submitted-pin",
+        name: "New charger",
+      }),
+      showMessage: sinon.stub().resolves(),
+    };
+    const add = actionById(manager.getInfo().actions!, "addBluetoothCharger");
+
+    expect(await add.handler!(context)).to.deep.equal({ refresh: false });
+    const message = JSON.stringify(context.showMessage.firstCall.args[0]);
+    expect(message).to.include(
+      "existing stored Bluetooth configuration is invalid",
+    );
+    expect(message).to.include("entry 1 field pin");
+    expect(message).not.to.include("new-submitted-pin");
+    expect(message).not.to.include("stored-ciphertext-secret");
+    expect(message).not.to.include("decrypt-error-secret");
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(adapter.encrypt.called).to.equal(false);
+    expect(adapter.log.error.called).to.equal(false);
+    expect(adapter.log.warn.called).to.equal(false);
+  });
+
   it("continues loading and preserving the legacy JSON configuration", async () => {
     const legacyJson =
       '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';

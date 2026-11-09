@@ -138,6 +138,7 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
 function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
   const adapter = createAdapterHarness();
   adapter.connectionMode = "bluetooth";
+  adapter.config = { bluetoothBinding: "auto" };
   adapter.bluetoothChargers = [
     { serialNumber: "EMX12345", pin: "1234", name: "Garage charger" },
   ];
@@ -171,6 +172,7 @@ describe("Bluetooth startup shutdown races", () => {
     const adapter = createBluetoothStartupHarness();
     const scanner = {
       close: sinon.stub().resolves(),
+      getBinding: sinon.stub().returns("dbus"),
       getAdapterState: sinon.stub().returns("poweredOn"),
       onAdapterStateChange: sinon.stub().returns(sinon.stub()),
     };
@@ -199,11 +201,75 @@ describe("Bluetooth startup shutdown races", () => {
     expect(adapter.configurePollInterval.called).to.equal(false);
   });
 
+  it("reports a valid empty configuration separately from an invalid one", async () => {
+    const adapter = createBluetoothStartupHarness();
+    adapter.getConfiguredBluetoothChargers.returns([]);
+    const scanner = {
+      close: sinon.stub().resolves(),
+      getBinding: sinon.stub().returns("dbus"),
+      getAdapterState: sinon.stub().returns("poweredOn"),
+      onAdapterStateChange: sinon.stub().returns(sinon.stub()),
+    };
+    nobleScannerFactoryOverride = () => Promise.resolve(scanner);
+
+    await adapter.startBluetooth();
+
+    const infoLogs = JSON.stringify(adapter.log.info.args);
+    expect(infoLogs).to.include("no chargers are configured");
+    expect(infoLogs).to.include("Using Noble Bluetooth binding: dbus.");
+    expect(infoLogs).not.to.include("configuration is invalid");
+    expect(adapter.log.error.called).to.equal(false);
+  });
+
+  it("reports invalid stored configuration without treating it as empty or logging secrets", async () => {
+    const adapter = createBluetoothStartupHarness();
+    const encryptedPin = "easee:v1:stored-ciphertext-secret";
+    const decryptError = "decrypt-error-secret";
+    adapter.config = {
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX12345",
+          pin: encryptedPin,
+          name: "Garage charger",
+        },
+      ],
+      bluetoothChargerListManaged: true,
+    };
+    adapter.decrypt = sinon.stub().throws(new Error(decryptError));
+    adapter.getConfiguredBluetoothChargers =
+      createAdapter.Easee.prototype.getConfiguredBluetoothChargers.bind(
+        adapter,
+      );
+    const scanner = {
+      close: sinon.stub().resolves(),
+      getBinding: sinon.stub().returns("dbus"),
+      getAdapterState: sinon.stub().returns("poweredOn"),
+      onAdapterStateChange: sinon.stub().returns(sinon.stub()),
+    };
+    nobleScannerFactoryOverride = () => Promise.resolve(scanner);
+
+    await adapter.startBluetooth();
+
+    const logs = JSON.stringify({
+      error: adapter.log.error.args,
+      info: adapter.log.info.args,
+      warn: adapter.log.warn.args,
+    });
+    expect(logs).to.include("entry 1 field pin");
+    expect(logs).to.include("configuration is invalid");
+    expect(logs).not.to.include(encryptedPin);
+    expect(logs).not.to.include(decryptError);
+    expect(logs).not.to.include("no chargers are configured");
+    expect(logs).not.to.include("0 configured charger(s)");
+    expect(adapter.bluetoothChargers).to.deep.equal([]);
+  });
+
   it("stops initialization when unload begins during adapter status update", async () => {
     const adapter = createBluetoothStartupHarness();
     const scanner = {
       close: sinon.stub().resolves(),
       discover: sinon.stub().resolves([]),
+      getBinding: sinon.stub().returns("dbus"),
       getAdapterState: sinon.stub().returns("poweredOn"),
       onAdapterStateChange: sinon.stub().returns(sinon.stub()),
       connect: sinon.stub(),
@@ -248,7 +314,7 @@ describe("Bluetooth reconnect backoff", () => {
     const reconnect = sinon.stub().resolves();
     adapter.bluetoothStartupComplete = true;
     adapter.bluetoothClient = { reconnect };
-    adapter.bluetoothConnections = new Map([["EHLUTXLE", false]]);
+    adapter.bluetoothConnections = new Map([["TEST0001", false]]);
     adapter.bluetoothReconnectDelay = 10000;
     adapter.bluetoothReconnectTimer = null;
     adapter.bluetoothReconnectInFlight = false;

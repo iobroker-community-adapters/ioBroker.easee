@@ -35,6 +35,7 @@ import type { BluetoothCommand } from "./lib/bluetooth-protocol.ts";
 import { createNobleBluetoothScanner } from "./lib/noble-bluetooth-transport.ts";
 import { mapBluetoothPoll } from "./lib/bluetooth-mapping.ts";
 import {
+  BluetoothConfigurationError,
   getConnectionMode,
   parseBluetoothChargers,
   parseBluetoothChargerSettings,
@@ -353,6 +354,49 @@ function parseBluetoothChargersAllowEmpty(
   return value.length === 0 ? [] : parseBluetoothChargers(value);
 }
 
+function getStoredBluetoothConfigurationError(
+  error: unknown,
+): BluetoothConfigurationError {
+  if (
+    error instanceof BluetoothConfigurationError &&
+    error.source === "stored"
+  ) {
+    return error;
+  }
+  return new BluetoothConfigurationError(
+    "Stored Bluetooth charger configuration could not be read.",
+    "Die gespeicherte Bluetooth-Konfiguration konnte nicht gelesen werden.",
+    "stored",
+  );
+}
+
+function getBluetoothDeviceActionErrorMessage(
+  error: unknown,
+  action: "save" | "remove",
+): ioBroker.StringOrTranslated {
+  if (error instanceof BluetoothConfigurationError) {
+    if (error.source === "stored") {
+      return {
+        en: `The charger could not be ${action === "save" ? "saved" : "removed"} because the existing stored Bluetooth configuration is invalid: ${error.message}`,
+        de: `Die Wallbox konnte nicht ${action === "save" ? "gespeichert" : "entfernt"} werden, weil die vorhandene gespeicherte Bluetooth-Konfiguration ungültig ist: ${error.messageDe}`,
+      };
+    }
+    return {
+      en: `The submitted Bluetooth charger data is invalid: ${error.message}`,
+      de: `Die eingegebenen Bluetooth-Daten sind ungültig: ${error.messageDe}`,
+    };
+  }
+  return action === "save"
+    ? {
+        en: "The charger could not be saved. Check the serial number, PIN, and duplicate chargers.",
+        de: "Die Wallbox konnte nicht gespeichert werden. Prüfen Sie Seriennummer, PIN und mögliche Duplikate.",
+      }
+    : {
+        en: "The charger could not be removed from the configuration.",
+        de: "Die Wallbox konnte nicht aus der Konfiguration entfernt werden.",
+      };
+}
+
 function isRetryableError(error: unknown): error is RetryableError {
   return (
     error instanceof Error && (error as RetryableError).retryDeferred === true
@@ -467,32 +511,38 @@ class Easee extends Adapter {
   }
 
   getConfiguredBluetoothChargers(): BluetoothChargerConfig[] {
+    let chargers: BluetoothChargerConfig[];
     try {
-      const chargerList = this.config.bluetoothChargerList;
-      if (Array.isArray(chargerList) && chargerList.length > 0) {
-        const decryptedList = chargerList.map((charger: unknown) => {
-          if (!isRecord(charger) || typeof charger.pin !== "string") {
-            return charger;
-          }
-          const pin = charger.pin.startsWith(encryptedBluetoothPinPrefix)
-            ? this.decrypt(
-                charger.pin.slice(encryptedBluetoothPinPrefix.length),
-              )
-            : charger.pin;
-          return { ...charger, pin };
-        });
-        return parseBluetoothChargerSettings({
-          ...this.config,
-          bluetoothChargerList: decryptedList,
-        });
-      }
-      if (this.config.bluetoothChargerListManaged === true) {
-        return [];
-      }
-      return parseBluetoothChargerSettings(this.config);
-    } catch {
-      throw new Error("Invalid Bluetooth charger configuration");
+      chargers = parseBluetoothChargerSettings(this.config);
+    } catch (error) {
+      throw getStoredBluetoothConfigurationError(error);
     }
+
+    return chargers.map((charger, index) => {
+      if (!charger.pin.startsWith(encryptedBluetoothPinPrefix)) {
+        return charger;
+      }
+      let pin: string;
+      try {
+        pin = this.decrypt(
+          charger.pin.slice(encryptedBluetoothPinPrefix.length),
+        );
+      } catch {
+        throw new BluetoothConfigurationError(
+          `Stored Bluetooth charger entry ${index + 1} field pin could not be decrypted.`,
+          `Der PIN in Eintrag ${index + 1}, Feld pin, der gespeicherten Bluetooth-Konfiguration konnte nicht entschlüsselt werden.`,
+          "stored",
+        );
+      }
+      if (typeof pin !== "string" || !pin.trim()) {
+        throw new BluetoothConfigurationError(
+          `Stored Bluetooth charger entry ${index + 1} field pin did not decrypt to a non-empty string.`,
+          `Der PIN in Eintrag ${index + 1}, Feld pin, der gespeicherten Bluetooth-Konfiguration wurde nicht als nichtleere Zeichenkette entschlüsselt.`,
+          "stored",
+        );
+      }
+      return { ...charger, pin: pin.trim() };
+    });
   }
 
   async addBluetoothCharger(value: unknown): Promise<void> {
@@ -925,16 +975,26 @@ class Easee extends Adapter {
       true,
     );
 
+    let configurationError: BluetoothConfigurationError | null = null;
     try {
       this.bluetoothChargers = this.getConfiguredBluetoothChargers();
-    } catch {
-      this.log.error("Invalid Bluetooth charger configuration");
+    } catch (error) {
+      configurationError = getStoredBluetoothConfigurationError(error);
+      this.log.error(
+        `Invalid Bluetooth charger configuration: ${configurationError.message}`,
+      );
       this.bluetoothChargers = [];
     }
 
-    this.log.info(
-      `Initializing Bluetooth transport for ${this.bluetoothChargers.length} configured charger(s).`,
-    );
+    if (configurationError) {
+      this.log.info(
+        "Initializing Bluetooth transport for manual searches because the stored charger configuration is invalid.",
+      );
+    } else {
+      this.log.info(
+        `Initializing Bluetooth transport for ${this.bluetoothChargers.length} configured charger(s).`,
+      );
+    }
     const devices: BluetoothDeviceConfig[] = [];
     for (const config of this.bluetoothChargers) {
       const charger: Charger = {
@@ -955,7 +1015,14 @@ class Easee extends Adapter {
     }
 
     try {
-      const scanner = await createNobleBluetoothScanner();
+      const diagnosticLogger = {
+        debug: (message: string) => this.log.debug(message),
+      };
+      const scanner = await createNobleBluetoothScanner(
+        undefined,
+        this.config.bluetoothBinding,
+        diagnosticLogger,
+      );
       if (this.unloading) {
         await scanner
           .close()
@@ -966,6 +1033,7 @@ class Easee extends Adapter {
           );
         return;
       }
+      this.log.info(`Using Noble Bluetooth binding: ${scanner.getBinding()}.`);
       this.bluetoothScanner = scanner;
       this.bluetoothAdapterStateUnsubscribe = scanner.onAdapterStateChange(
         (state) => this.updateBluetoothAdapterState(state),
@@ -977,14 +1045,21 @@ class Easee extends Adapter {
       }
       if (this.bluetoothChargers.length === 0) {
         this.bluetoothStartupComplete = true;
-        this.log.info(
-          "Bluetooth is ready for manual searches; no chargers are configured",
-        );
+        if (configurationError) {
+          this.log.info(
+            "Bluetooth is ready for manual searches; the stored charger configuration is invalid (see the error above).",
+          );
+        } else {
+          this.log.info(
+            "Bluetooth is ready for manual searches; no chargers are configured",
+          );
+        }
         await this.updateBluetoothSearchReadiness();
         return;
       }
 
       const options: BluetoothClientOptions = {
+        diagnosticLogger,
         onStatus: (event) => this.handleBluetoothStatus(event),
       };
       this.bluetoothClient = new BluetoothClient(devices, scanner, options);
@@ -1258,7 +1333,7 @@ class Easee extends Adapter {
           if (!scanFinished && isCurrentScan()) {
             await this.setStateAsync(
               "info.bluetoothScanResults",
-              `Searching for Easee BLE advertisements (up to ${bluetoothManualScanTimeoutMs / 1000} seconds)...\nAdvertisement names/connectability/service UUIDs observed so far:\n${observations.join("\n")}`,
+              `Searching for Easee BLE advertisements (up to ${bluetoothManualScanTimeoutMs / 1000} seconds)...\nAdvertisement names/connectability/service UUIDs/manufacturer matches observed so far:\n${observations.join("\n")}`,
               true,
             );
           }
@@ -1284,7 +1359,7 @@ class Easee extends Adapter {
         return { error: "unavailable" };
       }
       this.log.info(
-        `Starting manual Bluetooth search for the Easee service UUID ${BLUETOOTH_SERVICE_UUID} with an unfiltered advertisement scan; local adapter state is ${adapterState ?? "unknown"}.`,
+        `Starting manual Bluetooth search for the Easee service UUID ${BLUETOOTH_SERVICE_UUID} or manufacturer ID 3118 with an unfiltered advertisement scan; local adapter state is ${adapterState ?? "unknown"}.`,
       );
       scanStartedAt = Date.now();
       const scanTask = scanner.discover(
@@ -1313,7 +1388,10 @@ class Easee extends Adapter {
                 : report.connectable
                   ? "connectable"
                   : "not connectable";
-            const observation = `${name} [${connectability}; service UUIDs: ${serviceUuids.join(", ") || "none"}]`;
+            const manufacturerMatch = report.easeeManufacturerMatch
+              ? "match"
+              : "no match";
+            const observation = `${name} [${connectability}; service UUIDs: ${serviceUuids.join(", ") || "none"}; manufacturer ID 3118: ${manufacturerMatch}]`;
             if (
               observedAdvertisements.size < 20 &&
               !observedAdvertisements.has(observation)
@@ -1331,10 +1409,10 @@ class Easee extends Adapter {
       if (isCurrentScan()) {
         const observations = [...observedAdvertisements];
         this.log.info(
-          `Manual Bluetooth search completed in ${Date.now() - (scanStartedAt ?? Date.now())} ms: ${candidates.length} advertisement(s) matched the Easee service UUID.`,
+          `Manual Bluetooth search completed in ${Date.now() - (scanStartedAt ?? Date.now())} ms: ${candidates.length} advertisement(s) matched the Easee service UUID or manufacturer ID 3118.`,
         );
         this.log.info(
-          `Unfiltered BLE diagnostics observed ${observedAdvertisementCount} advertisement(s); name/connectability/service UUID observations: ${observations.join("; ") || "none"}.`,
+          `Unfiltered BLE diagnostics observed ${observedAdvertisementCount} advertisement(s); name/connectability/service UUID/manufacturer signature observations: ${observations.join("; ") || "none"}.`,
         );
         await this.setStateAsync(
           "info.bluetoothScanResults",
@@ -1387,10 +1465,10 @@ class Easee extends Adapter {
       readonly observations: readonly string[];
     },
   ): string {
+    const diagnosticSummary = diagnostics
+      ? `\nNoble observed ${diagnostics.observedAdvertisementCount} BLE advertisement(s) without a service UUID filter. Name/connectability/service UUID/manufacturer signature observations: ${diagnostics.observations.join("; ") || "none"}.`
+      : "";
     if (candidates.length === 0) {
-      const diagnosticSummary = diagnostics
-        ? ` Noble observed ${diagnostics.observedAdvertisementCount} BLE advertisement(s) without a service UUID filter. Name/connectability/service UUID observations: ${diagnostics.observations.join("; ") || "none"}.`
-        : "";
       return `No matching advertisements were found during this scan. This does not establish whether a charger is available.${diagnosticSummary}`;
     }
     const displayLimit = 100;
@@ -1407,10 +1485,11 @@ class Easee extends Adapter {
             : "not connectable";
       return `- ${name || "Name not broadcast"} [${connectability}] (observed BLE identifier: ${id})`;
     });
-    const omitted = candidates.length - results.length;
-    const note =
-      omitted > 0 ? `\n${omitted} additional result(s) omitted.` : "";
-    return `Found ${candidates.length} matching advertisement(s):\n${results.join("\n")}${note}`;
+    const omitted =
+      candidates.length - results.length > 0
+        ? `\n${candidates.length - results.length} additional result(s) omitted.`
+        : "";
+    return `Found ${candidates.length} matching advertisement(s):\n${results.join("\n")}${omitted}${diagnosticSummary}`;
   }
 
   async setBluetoothInfoObjects(charger: Charger): Promise<void> {
@@ -1461,19 +1540,24 @@ class Easee extends Adapter {
   private sanitizeBluetoothDiagnostic(value: string): string {
     let sanitized = value.replace(/[\r\n\t]+/g, " ");
     for (const charger of this.bluetoothChargers) {
+      if (charger.serialNumber) {
+        sanitized = sanitized.split(charger.serialNumber).join("[redacted]");
+      }
       if (charger.pin) {
         sanitized = sanitized.split(charger.pin).join("[redacted]");
       }
     }
-    return sanitized.slice(0, 200);
+    return sanitized
+      .replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/gi, "[redacted]")
+      .replace(/\bdev_(?:[0-9a-f]{2}_){5}[0-9a-f]{2}\b/gi, "dev_[redacted]")
+      .slice(0, 200);
   }
 
   handleBluetoothStatus(event: BluetoothStatusEvent): void {
-    const serial = this.sanitizeBluetoothDiagnostic(event.serial);
     const detail = event.error
       ? this.sanitizeBluetoothDiagnostic(event.error.message)
       : undefined;
-    const statusMessage = `Bluetooth charger ${serial}: ${event.status}`;
+    const statusMessage = `Bluetooth connection state: ${event.status}`;
     if (detail !== undefined) {
       if (
         detail.startsWith("No advertisements matching") ||
@@ -5413,11 +5497,10 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
             }
             try {
               await this.adapter.addBluetoothCharger(form);
-            } catch {
-              await context.showMessage({
-                en: "The charger could not be saved. Check the serial number, PIN, and duplicate chargers.",
-                de: "Die Wallbox konnte nicht gespeichert werden. Prüfen Sie Seriennummer, PIN und mögliche Duplikate.",
-              });
+            } catch (error) {
+              await context.showMessage(
+                getBluetoothDeviceActionErrorMessage(error, "save"),
+              );
               return { refresh: false };
             }
             await context.showMessage({
@@ -5435,8 +5518,20 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
     let chargers: BluetoothChargerConfig[];
     try {
       chargers = this.adapter.getConfiguredBluetoothChargers();
-    } catch {
-      chargers = [];
+    } catch (error) {
+      const configurationError = getStoredBluetoothConfigurationError(error);
+      context.setTotalDevices(1);
+      context.addDevice({
+        id: "__bluetooth-configuration-error__",
+        identifier: "Stored Bluetooth configuration",
+        name: {
+          en: `Bluetooth configuration error: ${configurationError.message}`,
+          de: `Fehler in der Bluetooth-Konfiguration: ${configurationError.messageDe}`,
+        },
+        connectionType: "bluetooth",
+        status: { connection: "disconnected", warning: true },
+      });
+      return;
     }
     context.setTotalDevices(chargers.length);
     for (const charger of chargers) {
@@ -5450,8 +5545,8 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
       charger = this.adapter
         .getConfiguredBluetoothChargers()
         .find((item) => item.serialNumber === deviceId);
-    } catch {
-      throw new Error("Bluetooth charger configuration is unavailable");
+    } catch (error) {
+      throw getStoredBluetoothConfigurationError(error);
     }
     if (!charger) {
       throw new Error("Bluetooth charger is not configured");
@@ -5488,11 +5583,10 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
             }
             try {
               await this.adapter.editBluetoothCharger(serialNumber, form);
-            } catch {
-              await context.showMessage({
-                en: "The charger could not be saved. Check the serial number, PIN, and duplicate chargers.",
-                de: "Die Wallbox konnte nicht gespeichert werden. Prüfen Sie Seriennummer, PIN und mögliche Duplikate.",
-              });
+            } catch (error) {
+              await context.showMessage(
+                getBluetoothDeviceActionErrorMessage(error, "save"),
+              );
               return { refresh: "none" };
             }
             await context.showMessage({
@@ -5516,11 +5610,10 @@ class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
             }
             try {
               await this.adapter.removeBluetoothCharger(serialNumber);
-            } catch {
-              await context.showMessage({
-                en: "The charger could not be removed from the configuration.",
-                de: "Die Wallbox konnte nicht aus der Konfiguration entfernt werden.",
-              });
+            } catch (error) {
+              await context.showMessage(
+                getBluetoothDeviceActionErrorMessage(error, "remove"),
+              );
               return { refresh: "none" };
             }
             await context.showMessage({
