@@ -118,10 +118,10 @@ function createHarness(initialConfig: Record<string, unknown> = {}): {
     },
   };
   adapter.getForeignObjectAsync = sinon.stub().resolves(storedObject);
-  adapter.extendForeignObjectAsync = sinon
+  adapter.setForeignObjectAsync = sinon
     .stub()
-    .callsFake((_id: string, patch: { native: Record<string, unknown> }) => {
-      Object.assign(storedObject.native, patch.native);
+    .callsFake((_id: string, object: { native: Record<string, unknown> }) => {
+      Object.assign(storedObject, object);
       return Promise.resolve();
     });
   const manager = new TestDeviceManagement(adapter);
@@ -156,6 +156,170 @@ describe("Bluetooth charger Device Manager", () => {
     expect(devices).to.have.length(1);
     expect(JSON.stringify(devices)).not.to.include("4321");
     expect(JSON.stringify(devices)).to.include("EMX123456");
+  });
+
+  it("shows charger connection, power, and Bluetooth signal on its card", () => {
+    const { manager } = createHarness({
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX123456",
+          pin: "easee:v1:encrypted-34333231",
+          name: "Garage",
+        },
+      ],
+      bluetoothChargerListManaged: true,
+    });
+
+    const [device] = manager.getDevices();
+    expect(device.name).to.equal("Garage");
+    expect(device.status).to.deep.equal({
+      connection: {
+        stateId: "easee.0.EMX123456.info.bluetoothConnection",
+        mapping: { true: "connected", false: "disconnected" },
+      },
+    });
+    expect(
+      device.controls?.map(({ id, type, stateId, label, unit }) => ({
+        id,
+        type,
+        stateId,
+        label,
+        unit,
+      })),
+    ).to.deep.equal([
+      {
+        id: "totalPower",
+        type: "info",
+        stateId: "easee.0.EMX123456.status.totalPower",
+        label: {
+          en: "Charging power",
+          de: "Ladeleistung",
+          es: "Potencia de carga",
+          fr: "Puissance de charge",
+          it: "Potenza di ricarica",
+          nl: "Laadvermogen",
+          pl: "Moc ładowania",
+          pt: "Potência de carregamento",
+          ru: "Мощность зарядки",
+          uk: "Потужність заряджання",
+          "zh-cn": "充电功率",
+        },
+        unit: "kW",
+      },
+      {
+        id: "bluetoothRSSI",
+        type: "info",
+        stateId: "easee.0.EMX123456.info.bluetoothRSSI",
+        label: {
+          en: "Bluetooth signal strength",
+          de: "Bluetooth-Signalstärke",
+          es: "Intensidad de la señal Bluetooth",
+          fr: "Intensité du signal Bluetooth",
+          it: "Intensità del segnale Bluetooth",
+          nl: "Bluetooth-signaalsterkte",
+          pl: "Siła sygnału Bluetooth",
+          pt: "Intensidade do sinal Bluetooth",
+          ru: "Уровень сигнала Bluetooth",
+          uk: "Рівень сигналу Bluetooth",
+          "zh-cn": "蓝牙信号强度",
+        },
+        unit: "dBm",
+      },
+    ]);
+  });
+
+  it("reads power and Bluetooth signal for every charger card", async () => {
+    const { adapter, manager } = createHarness({
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX123456",
+          pin: "easee:v1:encrypted-34333231",
+          name: "Garage",
+        },
+        {
+          serialNumber: "EMX654321",
+          pin: "easee:v1:encrypted-35363738",
+          name: "Driveway",
+        },
+      ],
+      bluetoothChargerListManaged: true,
+    });
+    const expectedStates: Record<string, unknown> = {
+      "EMX123456.status.totalPower": {
+        val: 7.2,
+        ack: true,
+        ts: 1,
+        lc: 1,
+        from: "system.adapter.easee.0",
+      },
+      "EMX123456.info.bluetoothRSSI": {
+        val: -54,
+        ack: true,
+        ts: 2,
+        lc: 2,
+        from: "system.adapter.easee.0",
+      },
+      "EMX654321.status.totalPower": {
+        val: 3.6,
+        ack: true,
+        ts: 3,
+        lc: 3,
+        from: "system.adapter.easee.0",
+      },
+      "EMX654321.info.bluetoothRSSI": {
+        val: -61,
+        ack: true,
+        ts: 4,
+        lc: 4,
+        from: "system.adapter.easee.0",
+      },
+    };
+    const getStateAsync = sinon
+      .stub()
+      .callsFake((stateId: string) => Promise.resolve(expectedStates[stateId]));
+    adapter.getStateAsync = getStateAsync;
+
+    const devices = manager.getDevices();
+    expect(devices).to.have.length(2);
+    for (const device of devices) {
+      const controls = device.controls as unknown as {
+        id: string;
+        getStateHandler?: () => Promise<unknown>;
+      }[];
+      expect(controls).to.have.length(2);
+      for (const control of controls) {
+        expect(control.getStateHandler).to.be.a("function");
+        const stateId = `${device.id}.${control.id === "totalPower" ? "status.totalPower" : "info.bluetoothRSSI"}`;
+        expect(await control.getStateHandler!()).to.deep.equal(
+          expectedStates[stateId],
+        );
+      }
+    }
+    expect(getStateAsync.getCalls().map(({ args }) => args[0])).to.deep.equal(
+      Object.keys(expectedStates),
+    );
+  });
+
+  it("keeps card values empty until their states are available", async () => {
+    const { adapter, manager } = createHarness({
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX123456",
+          pin: "easee:v1:encrypted-34333231",
+          name: "Garage",
+        },
+      ],
+      bluetoothChargerListManaged: true,
+    });
+    adapter.getStateAsync = sinon.stub().resolves(null);
+
+    const [device] = manager.getDevices();
+    const controls = device.controls as unknown as {
+      getStateHandler?: () => Promise<{ val: unknown }>;
+    }[];
+    for (const control of controls) {
+      expect((await control.getStateHandler!()).val).to.equal(null);
+    }
   });
 
   it("adds a charger, encrypts its PIN, and leaves legacy configuration untouched", async () => {
@@ -274,7 +438,7 @@ describe("Bluetooth charger Device Manager", () => {
     expect(message).not.to.include("new-submitted-pin");
     expect(message).not.to.include("stored-ciphertext-secret");
     expect(message).not.to.include("decrypt-error-secret");
-    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(adapter.setForeignObjectAsync.called).to.equal(false);
     expect(adapter.encrypt.called).to.equal(false);
     expect(adapter.log.error.called).to.equal(false);
     expect(adapter.log.warn.called).to.equal(false);
@@ -383,7 +547,7 @@ describe("Bluetooth charger Device Manager", () => {
     const add = actionById(manager.getInfo().actions!, "addBluetoothCharger");
 
     expect(await add.handler!(context)).to.deep.equal({ refresh: false });
-    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(adapter.setForeignObjectAsync.called).to.equal(false);
     expect(
       JSON.stringify(context.showMessage.firstCall.args[0]),
     ).not.to.include("sensitive-pin");
@@ -423,6 +587,6 @@ describe("Bluetooth charger Device Manager", () => {
     expect(() => manager.getDevice("EMX654321")).to.throw(
       "Bluetooth charger is not configured",
     );
-    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(adapter.setForeignObjectAsync.called).to.equal(false);
   });
 });

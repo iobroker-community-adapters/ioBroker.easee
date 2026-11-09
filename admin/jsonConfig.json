@@ -1,291 +1,380 @@
 {
     "i18n": true,
-    "type": "panel",
+    "type": "tabs",
     "items": {
-        "_Headline2": {
-            "newLine": true,
-            "type": "header",
-            "size": 2,
-            "text": "Account settings",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "connectionMode": {
-            "newLine": true,
-            "type": "select",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "options": [
-                {
-                    "label": "Easee Cloud",
-                    "value": "cloud"
+        "connection": {
+            "type": "panel",
+            "label": "Connection",
+            "items": {
+                "connectionMode": {
+                    "newLine": true,
+                    "type": "select",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "options": [
+                        {
+                            "label": "Easee Cloud",
+                            "value": "cloud"
+                        },
+                        {
+                            "label": "Bluetooth (local)",
+                            "value": "bluetooth"
+                        }
+                    ],
+                    "default": "cloud",
+                    "label": "Connection mode"
                 },
-                {
-                    "label": "Bluetooth (local)",
-                    "value": "bluetooth"
+                "_Headline2": {
+                    "newLine": true,
+                    "type": "header",
+                    "size": 2,
+                    "text": "Account settings",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_bluetoothInfo": {
+                    "newLine": true,
+                    "type": "infoBox",
+                    "boxType": "info",
+                    "closeable": false,
+                    "text": "1. In the device manager below, enter each charger's ID or serial number and Bluetooth PIN. 2. Save the settings and restart the adapter. 3. Manual search is optional and does not replace the ID or PIN.",
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "_bluetoothDeviceManager": {
+                    "newLine": true,
+                    "type": "deviceManager",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "username": {
+                    "newLine": true,
+                    "type": "text",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "label": "Username",
+                    "help": "username to access Easee cloud",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "client_secret": {
+                    "type": "password",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "label": "Password",
+                    "help": "password of Easee cloud",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_Headline3": {
+                    "newLine": true,
+                    "type": "header",
+                    "size": 2,
+                    "text": "API settings",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "polltime": {
+                    "type": "number",
+                    "min": 10,
+                    "max": 86400,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "label": "polltime",
+                    "help": "Poll interval in seconds",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionPollingHeadline": {
+                    "newLine": true,
+                    "type": "header",
+                    "size": 2,
+                    "text": "Session polling",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "sessionPollMode": {
+                    "type": "select",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "options": [
+                        {
+                            "label": "Automatic",
+                            "value": "auto"
+                        },
+                        {
+                            "label": "Manual",
+                            "value": "manual"
+                        }
+                    ],
+                    "default": "auto",
+                    "label": "Session polling mode",
+                    "help": "Automatic mode uses seven minutes per detected charger. Manual mode sets the desired interval per charger.",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "sessionPollInterval": {
+                    "type": "number",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "min": 7,
+                    "max": 35791,
+                    "step": 1,
+                    "unit": "min",
+                    "default": 60,
+                    "label": "Manual session interval per charger",
+                    "help": "Intervals below the recommendation are conservatively clamped to the recommendation.",
+                    "hidden": "data.connectionMode !== 'cloud' || data.sessionPollMode !== 'manual'"
+                },
+                "_sessionChargerCountLabel": {
+                    "newLine": true,
+                    "type": "staticText",
+                    "text": "Detected chargers",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionChargerCount": {
+                    "newLine": true,
+                    "type": "state",
+                    "oid": "info.sessionPollChargerCount",
+                    "control": "text",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionRecommendedIntervalLabel": {
+                    "newLine": true,
+                    "type": "staticText",
+                    "text": "Recommended interval per charger",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionRecommendedInterval": {
+                    "newLine": true,
+                    "type": "state",
+                    "oid": "info.sessionPollRecommendedInterval",
+                    "control": "text",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "unit": "min",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionEffectiveIntervalLabel": {
+                    "newLine": true,
+                    "type": "staticText",
+                    "text": "Effective interval per charger",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionEffectiveInterval": {
+                    "newLine": true,
+                    "type": "state",
+                    "oid": "info.sessionPollEffectiveInterval",
+                    "control": "text",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "unit": "min",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "_sessionIntervalWarning": {
+                    "newLine": true,
+                    "type": "infoBox",
+                    "boxType": "warning",
+                    "closeable": false,
+                    "text": "The configured interval is below the recommendation and will be clamped.",
+                    "dependsOnStates": {
+                        "chargerCount": ".info.sessionPollChargerCount"
+                    },
+                    "hidden": "data.connectionMode !== 'cloud' || data.sessionPollMode !== 'manual' || !_states.chargerCount?.val || data.sessionPollInterval >= _states.chargerCount.val * 7"
+                },
+                "signalR": {
+                    "newLine": true,
+                    "type": "checkbox",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "label": "Use SignalR",
+                    "hidden": "data.connectionMode !== 'cloud'"
+                },
+                "logtype": {
+                    "type": "checkbox",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "label": "Log cloud token refresh",
+                    "help": "Show info messages when the cloud access token expires and is refreshed successfully.",
+                    "hidden": "data.connectionMode !== 'cloud'"
                 }
-            ],
-            "default": "cloud",
-            "label": "Connection mode"
+            }
         },
-        "_bluetoothInfo": {
-            "newLine": true,
-            "type": "infoBox",
-            "boxType": "info",
-            "closeable": false,
-            "text": "Bluetooth mode requires a compatible Bluetooth LE adapter and platform-specific permissions. Add or remove chargers in the ioBroker Device Manager. PINs are encrypted in the adapter configuration. See the Bluetooth guide for setup and limitations.",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "bluetoothBinding": {
-            "newLine": true,
-            "type": "select",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "options": [
-                {
-                    "label": "Automatic",
-                    "value": "auto"
+        "bluetoothAdvanced": {
+            "type": "panel",
+            "label": "Advanced Bluetooth functions",
+            "items": {
+                "bluetoothBinding": {
+                    "newLine": true,
+                    "type": "select",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "options": [
+                        {
+                            "label": "Automatic (recommended)",
+                            "value": "auto"
+                        },
+                        {
+                            "label": "System Bluetooth service (Linux)",
+                            "value": "dbus"
+                        },
+                        {
+                            "label": "Direct adapter access (advanced)",
+                            "value": "hci"
+                        }
+                    ],
+                    "default": "auto",
+                    "label": "Bluetooth connection method",
+                    "help": "Use Automatic unless you need to choose a connection method. The default works best on most systems. See the Bluetooth guide if a search does not work.",
+                    "hidden": "data.connectionMode !== 'bluetooth'"
                 },
-                {
-                    "label": "BlueZ D-Bus",
-                    "value": "dbus"
+                "_bluetoothAdapterStatusLabel": {
+                    "newLine": true,
+                    "type": "staticText",
+                    "text": "Bluetooth status",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'bluetooth'"
                 },
-                {
-                    "label": "Raw HCI",
-                    "value": "hci"
+                "_bluetoothAdapterStatus": {
+                    "newLine": true,
+                    "type": "state",
+                    "oid": "info.bluetoothAdapterStateDisplay",
+                    "control": "text",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "help": "Shows whether Bluetooth on the computer running ioBroker is available. It does not show whether a charger was found or connected.",
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "_bluetoothSearchReadinessLabel": {
+                    "newLine": true,
+                    "type": "staticText",
+                    "text": "Can a search be started?",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "_bluetoothSearchReadiness": {
+                    "newLine": true,
+                    "type": "state",
+                    "oid": "info.bluetoothSearchReadinessDisplay",
+                    "control": "text",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "help": "Shows whether the adapter can start a search right now.",
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "_bluetoothManualSearch": {
+                    "type": "sendTo",
+                    "command": "bluetoothScan",
+                    "icon": "search",
+                    "showProcess": false,
+                    "timeout": 45000,
+                    "variant": "contained",
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4,
+                    "label": "Search for nearby Easee chargers",
+                    "result": {
+                        "completed": "Search completed"
+                    },
+                    "error": {
+                        "unavailable": "Bluetooth search is available only in Bluetooth mode.",
+                        "notReady": "Bluetooth is not available. Check that it is turned on and accessible.",
+                        "busy": "Bluetooth is busy. Please try again in a moment.",
+                        "failed": "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details."
+                    },
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "_bluetoothScanResultsLabel": {
+                    "newLine": true,
+                    "type": "staticText",
+                    "text": "Bluetooth search results",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "hidden": "data.connectionMode !== 'bluetooth'"
+                },
+                "_bluetoothScanResults": {
+                    "newLine": true,
+                    "type": "state",
+                    "oid": "info.bluetoothScanResults",
+                    "control": "text",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "help": "Search results show detected names, identifiers, and technical scan details. Use the device manager to add chargers.",
+                    "hidden": "data.connectionMode !== 'bluetooth'"
                 }
-            ],
-            "default": "auto",
-            "label": "Bluetooth binding",
-            "help": "Automatic uses the platform default and honors NOBLE_BINDINGS. On Linux, Raw HCI requires CAP_NET_RAW and may conflict with BlueZ or other Bluetooth clients.",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothAdapterStatus": {
-            "newLine": true,
-            "type": "state",
-            "oid": "info.bluetoothAdapterState",
-            "control": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 8,
-            "lg": 6,
-            "xl": 6,
-            "label": "Local Bluetooth adapter state",
-            "help": "This reports only the local adapter state. poweredOn means the adapter reports ready, but access restrictions can still prevent a scan; it does not mean a charger is nearby, discoverable, authenticated, or connected.",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothSearchReadiness": {
-            "newLine": true,
-            "type": "state",
-            "oid": "info.bluetoothSearchReadiness",
-            "control": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 8,
-            "lg": 6,
-            "xl": 6,
-            "label": "Bluetooth search readiness",
-            "help": "Shows whether a manual search can start. Ready refers only to the local adapter and available BLE transport; it does not confirm that a charger is nearby or advertising.",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothManualSearch": {
-            "newLine": true,
-            "type": "sendTo",
-            "command": "bluetoothScan",
-            "icon": "search",
-            "showProcess": false,
-            "timeout": 45000,
-            "variant": "contained",
-            "label": "Search for Easee BLE devices",
-            "result": {
-                "completed": "Search completed"
-            },
-            "error": {
-                "unavailable": "Bluetooth search is available only in Bluetooth mode.",
-                "notReady": "The local Bluetooth adapter is not ready.",
-                "busy": "Bluetooth is busy with connection, polling, or a write operation; try again shortly.",
-                "failed": "Bluetooth search failed. Check adapter access and logs."
             },
             "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "_bluetoothScanResults": {
-            "newLine": true,
-            "type": "state",
-            "oid": "info.bluetoothScanResults",
-            "control": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 12,
-            "lg": 12,
-            "xl": 12,
-            "label": "Bluetooth search results",
-            "help": "Search results are informational only and are never added to the Device Manager automatically.",
-            "hidden": "data.connectionMode !== 'bluetooth'"
-        },
-        "username": {
-            "newLine": true,
-            "type": "text",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "label": "Username",
-            "help": "username to access Easee cloud",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "client_secret": {
-            "type": "password",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "label": "Password",
-            "help": "password of Easee cloud",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "_Headline3": {
-            "newLine": true,
-            "type": "header",
-            "size": 2,
-            "text": "API settings",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "polltime": {
-            "type": "number",
-            "min": 10,
-            "max": 86400,
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "label": "polltime",
-            "help": "Poll interval in seconds",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "_sessionPollingHeadline": {
-            "newLine": true,
-            "type": "header",
-            "size": 2,
-            "text": "Session polling",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "sessionPollMode": {
-            "type": "select",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "options": [
-                {
-                    "label": "Automatic",
-                    "value": "auto"
-                },
-                {
-                    "label": "Manual",
-                    "value": "manual"
-                }
-            ],
-            "default": "auto",
-            "label": "Session polling mode",
-            "help": "Automatic mode uses seven minutes per detected charger. Manual mode sets the desired interval per charger.",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "sessionPollInterval": {
-            "type": "number",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "min": 7,
-            "max": 35791,
-            "step": 1,
-            "unit": "min",
-            "default": 60,
-            "label": "Manual session interval per charger",
-            "help": "Intervals below the recommendation are conservatively clamped to the recommendation.",
-            "hidden": "data.connectionMode !== 'cloud' || data.sessionPollMode !== 'manual'"
-        },
-        "_sessionChargerCount": {
-            "newLine": true,
-            "type": "state",
-            "oid": "info.sessionPollChargerCount",
-            "control": "text",
-            "xs": 12,
-            "sm": 8,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "label": "Detected chargers",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "_sessionRecommendedInterval": {
-            "newLine": true,
-            "type": "state",
-            "oid": "info.sessionPollRecommendedInterval",
-            "control": "text",
-            "xs": 12,
-            "sm": 8,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "unit": "min",
-            "label": "Recommended interval per charger",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "_sessionEffectiveInterval": {
-            "newLine": true,
-            "type": "state",
-            "oid": "info.sessionPollEffectiveInterval",
-            "control": "text",
-            "xs": 12,
-            "sm": 8,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "unit": "min",
-            "label": "Effective interval per charger",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "_sessionIntervalWarning": {
-            "type": "infoBox",
-            "boxType": "warning",
-            "closeable": false,
-            "text": "The configured interval is below the recommendation and will be clamped.",
-            "dependsOnStates": {
-                "chargerCount": ".info.sessionPollChargerCount"
-            },
-            "hidden": "data.connectionMode !== 'cloud' || data.sessionPollMode !== 'manual' || !_states.chargerCount?.val || data.sessionPollInterval >= _states.chargerCount.val * 7"
-        },
-        "signalR": {
-            "newLine": true,
-            "type": "checkbox",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "label": "Use SignalR",
-            "hidden": "data.connectionMode !== 'cloud'"
-        },
-        "logtype": {
-            "type": "checkbox",
-            "xs": 12,
-            "sm": 12,
-            "md": 6,
-            "lg": 4,
-            "xl": 4,
-            "label": "detailed info logging",
-            "help": "provide additional logging in info area"
         }
     }
 }

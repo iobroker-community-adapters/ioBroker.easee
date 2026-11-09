@@ -39,6 +39,22 @@ interface PendingCircuitWrite {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+interface AdminConfigItem {
+  type?: string;
+  label?: string;
+  hidden?: string;
+  text?: string;
+  help?: string;
+  oid?: string;
+  showProcess?: boolean;
+  timeout?: number;
+  items?: Record<string, AdminConfigItem>;
+}
+
+interface AdminConfigPanel extends AdminConfigItem {
+  items: Record<string, AdminConfigItem>;
+}
+
 interface ManualScanAdapter {
   connectionMode: string;
   unloading: boolean;
@@ -99,7 +115,18 @@ moduleLoader._load = function (
   isMain: boolean,
 ) {
   if (request === "@iobroker/adapter-core") {
-    return { Adapter: class {} };
+    return {
+      Adapter: class {},
+      I18n: {
+        init: () => Promise.resolve(),
+        t: (key: string, ...args: (string | number | boolean | null)[]) =>
+          args.reduce<string>(
+            (text, arg) =>
+              text.replace("%s", arg === null ? "null" : String(arg)),
+            key,
+          ),
+      },
+    };
   }
   return originalLoad.call(this, request, parent, isMain);
 };
@@ -188,24 +215,208 @@ function lastStateValue(stateWrites: sinon.SinonStub, id: string): unknown {
     .at(-1)?.args[1];
 }
 
+function readBluetoothTabs(): {
+  root: AdminConfigItem;
+  connection: AdminConfigPanel;
+  advanced: AdminConfigPanel;
+} {
+  const root = JSON.parse(
+    readFileSync("admin/jsonConfig.json", "utf8"),
+  ) as AdminConfigItem;
+  const connection = root.items?.connection;
+  const advanced = root.items?.bluetoothAdvanced;
+  if (
+    root.type !== "tabs" ||
+    !root.items ||
+    !connection?.items ||
+    !advanced?.items
+  ) {
+    throw new Error("Bluetooth settings tabs are not configured");
+  }
+  return {
+    root,
+    connection: connection as AdminConfigPanel,
+    advanced: advanced as AdminConfigPanel,
+  };
+}
+
 describe("manual Bluetooth search", () => {
   afterEach(() => sinon.restore());
 
   it("keeps the Admin request nonblocking and open for the 30-second scan", () => {
-    const jsonConfig = JSON.parse(
-      readFileSync("admin/jsonConfig.json", "utf8"),
-    ) as {
-      items: Record<string, { showProcess?: boolean; timeout?: number }>;
-    };
-    const manualSearch = jsonConfig.items._bluetoothManualSearch;
+    const { advanced } = readBluetoothTabs();
+    const manualSearch = advanced.items._bluetoothManualSearch;
 
     expect(manualSearch.showProcess).to.equal(false);
     expect(manualSearch.timeout).to.be.greaterThan(30000);
   });
 
-  it("searches for the Easee service and displays observed details without configuring devices", async () => {
+  it("keeps connection settings and advanced Bluetooth functions in two tabs", () => {
+    const { root, connection, advanced } = readBluetoothTabs();
+    const connectionItems = connection.items;
+    const advancedItems = advanced.items;
+    const info = connectionItems._bluetoothInfo;
+
+    expect(root.type).to.equal("tabs");
+    expect(Object.keys(root.items!)).to.deep.equal([
+      "connection",
+      "bluetoothAdvanced",
+    ]);
+    expect(connection.type).to.equal("panel");
+    expect(connection.label).to.equal("Connection");
+    expect(connection.items.connectionMode.label).to.equal("Connection mode");
+    expect(connectionItems).to.have.property("username");
+    expect(connectionItems).to.have.property("polltime");
+    expect(connectionItems).to.have.property("_bluetoothInfo");
+    expect(connectionItems).to.have.property("_bluetoothDeviceManager");
+    expect(advanced.type).to.equal("panel");
+    expect(advanced.label).to.equal("Advanced Bluetooth functions");
+    expect(advanced.hidden).to.equal("data.connectionMode !== 'bluetooth'");
+    expect(Object.keys(advancedItems)).to.deep.equal([
+      "bluetoothBinding",
+      "_bluetoothAdapterStatusLabel",
+      "_bluetoothAdapterStatus",
+      "_bluetoothSearchReadinessLabel",
+      "_bluetoothSearchReadiness",
+      "_bluetoothManualSearch",
+      "_bluetoothScanResultsLabel",
+      "_bluetoothScanResults",
+    ]);
+    for (const advancedKey of Object.keys(advancedItems)) {
+      expect(connectionItems).not.to.have.property(advancedKey);
+    }
+    expect(info.text).to.contain("ID or serial number and Bluetooth PIN");
+    expect(info.text).to.contain("Save the settings and restart the adapter");
+    expect(info.text).to.contain(
+      "Manual search is optional and does not replace the ID or PIN",
+    );
+    expect(advancedItems.bluetoothBinding.label).to.equal(
+      "Bluetooth connection method",
+    );
+    expect(advancedItems._bluetoothAdapterStatus.oid).to.equal(
+      "info.bluetoothAdapterStateDisplay",
+    );
+    expect(advancedItems._bluetoothSearchReadiness.oid).to.equal(
+      "info.bluetoothSearchReadinessDisplay",
+    );
+    expect(advancedItems._bluetoothManualSearch.label).to.equal(
+      "Search for nearby Easee chargers",
+    );
+    expect(advancedItems._bluetoothScanResults.oid).to.equal(
+      "info.bluetoothScanResults",
+    );
+    const settingText = JSON.stringify([info, ...Object.values(advancedItems)]);
+    for (const technicalTerm of [
+      "poweredOn",
+      "NOBLE_BINDINGS",
+      "CAP_NET_RAW",
+      "BlueZ",
+    ]) {
+      expect(settingText).not.to.contain(technicalTerm);
+    }
+  });
+
+  it("provides Bluetooth display text in every supported Admin language", () => {
+    const languages = [
+      "de",
+      "en",
+      "es",
+      "fr",
+      "it",
+      "nl",
+      "pl",
+      "pt",
+      "ru",
+      "uk",
+      "zh-cn",
+    ];
+    const keys = [
+      "Connection",
+      "Advanced Bluetooth functions",
+      "1. In the device manager below, enter each charger's ID or serial number and Bluetooth PIN. 2. Save the settings and restart the adapter. 3. Manual search is optional and does not replace the ID or PIN.",
+      "Search results show detected names, identifiers, and technical scan details. Use the device manager to add chargers.",
+      "Bluetooth status",
+      "Bluetooth connection method",
+      "Search for nearby Easee chargers",
+      "Shows whether Bluetooth on the computer running ioBroker is available. It does not show whether a charger was found or connected.",
+      "Can a search be started?",
+      "Shows whether the adapter can start a search right now.",
+      "Use Automatic unless you need to choose a connection method. The default works best on most systems. See the Bluetooth guide if a search does not work.",
+      "Automatic (recommended)",
+      "System Bluetooth service (Linux)",
+      "Direct adapter access (advanced)",
+      "The local Bluetooth adapter is ready.",
+      "Bluetooth is turned off.",
+      "Bluetooth access is not allowed.",
+      "Bluetooth is not supported on this device.",
+      "Bluetooth status is unknown.",
+      "The adapter is stopping.",
+      "Bluetooth search is available only in Bluetooth mode.",
+      "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
+      "The local Bluetooth adapter is not ready.",
+      "Bluetooth is starting.",
+      "Bluetooth is not available. Check the adapter log for details.",
+      "Bluetooth is not available. Check that it is turned on and accessible.",
+      "Bluetooth is connecting to the saved charger.",
+      "A Bluetooth search is already running.",
+      "The adapter is checking the saved charger.",
+      "The adapter is sending a command to the charger.",
+      "The adapter is updating the charger settings.",
+      "The adapter is reconnecting to the charger.",
+      "Ready to search for nearby chargers.",
+      "Waiting for Bluetooth to become available.",
+      "No search has been run yet.",
+      "Bluetooth is busy. Please try again in a moment.",
+      "Bluetooth is not available. Check that it is turned on and accessible.",
+      "Searching for nearby Easee chargers. Please wait up to %s seconds.",
+      "Bluetooth devices were detected, but no Easee charger was recognized. The charger may be out of range or not ready for Bluetooth.",
+      "No Easee charger was detected. It may be out of range or not ready for Bluetooth.",
+      "Found one possible Easee charger.",
+      "Found %s possible Easee chargers.",
+      "Device name not available.",
+      "And %s more.",
+    ];
+
+    for (const language of languages) {
+      const catalog = JSON.parse(
+        readFileSync(`admin/i18n/${language}.json`, "utf8"),
+      ) as Record<string, string>;
+      for (const key of keys) {
+        expect(catalog[key], `${language}: ${key}`).to.be.a("string").and.not
+          .empty;
+      }
+    }
+  });
+
+  it("keeps the Device Manager directly below the setup info in the Connection tab", () => {
+    const { connection, advanced } = readBluetoothTabs();
+    const connectionItems = connection.items;
+    const advancedItems = advanced.items;
+    const deviceManager = connectionItems._bluetoothDeviceManager;
+
+    expect(deviceManager.type).to.equal("deviceManager");
+    expect(deviceManager.hidden).to.equal(
+      "data.connectionMode !== 'bluetooth'",
+    );
+    expect(connectionItems._bluetoothInfo.type).to.equal("infoBox");
+    expect(connectionItems._bluetoothInfo.hidden).to.equal(
+      "data.connectionMode !== 'bluetooth'",
+    );
+    const connectionItemKeys = Object.keys(connectionItems);
+    const bluetoothInfoIndex = connectionItemKeys.indexOf("_bluetoothInfo");
+    expect(
+      connectionItemKeys.slice(bluetoothInfoIndex, bluetoothInfoIndex + 2),
+    ).to.deep.equal(["_bluetoothInfo", "_bluetoothDeviceManager"]);
+    expect(advancedItems).to.have.property("_bluetoothManualSearch");
+    expect(advancedItems).to.have.property("_bluetoothScanResults");
+  });
+
+  it("shows useful scan identifiers while redacting PINs without configuring devices", async () => {
     const candidates: BluetoothCandidate[] = [
-      { id: "ble-id-1", name: "Easee Home secret-pin" },
+      {
+        id: "58:BF:25:22:05:3A",
+        name: "Easee Home EMX123456 secret-pin PIN=1234 PIN 5678",
+      },
       { id: "ble-id-2" },
     ];
     const { adapter, scanner, stateWrites } = createHarness(
@@ -242,12 +453,25 @@ describe("manual Bluetooth search", () => {
       .find(
         (value) => typeof value === "string" && value.startsWith("Found 2"),
       );
-    expect(finalState).to.contain("Easee Home [redacted]");
-    expect(finalState).to.contain("ble-id-1");
+    expect(finalState).to.contain(
+      "Easee Home EMX123456 [redacted] PIN [redacted] PIN [redacted]",
+    );
+    expect(finalState).not.to.contain("5678");
+    expect(finalState).to.contain("58:BF:25:22:05:3A");
     expect(finalState).to.contain("Name not broadcast");
     expect(finalState).to.contain("ble-id-2");
-    expect(finalState).not.to.contain("EMX123456");
     expect(finalState).not.to.contain("secret-pin");
+    expect(finalState).not.to.contain("[redacted] at");
+    expect(finalState).to.contain("Noble observed 0 BLE advertisement(s)");
+    const displayResults = lastStateValue(
+      stateWrites,
+      "info.bluetoothScanResultsDisplay",
+    ) as string;
+    expect(displayResults).to.contain("Found 2 possible Easee chargers.");
+    expect(displayResults).to.contain("Easee Home EMX123456 [redacted]");
+    expect(displayResults).not.to.contain("ble-id");
+    expect(displayResults).not.to.contain("Noble observed");
+    expect(displayResults).not.to.contain("service UUID");
     const readiness = stateWrites
       .getCalls()
       .filter((call) => call.args[0] === "info.bluetoothSearchReadiness")
@@ -283,6 +507,12 @@ describe("manual Bluetooth search", () => {
             String(call.args[1]).startsWith("Ready to search"),
         ),
     ).to.equal(true);
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothAdapterStateDisplay"),
+    ).to.equal("The local Bluetooth adapter is ready.");
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothSearchReadinessDisplay"),
+    ).to.equal("Ready to search for nearby chargers.");
     sinon.assert.calledWithExactly(
       adapter.log.info,
       "Local Bluetooth adapter state: poweredOn.",
@@ -293,6 +523,20 @@ describe("manual Bluetooth search", () => {
     adapter.updateBluetoothAdapterState("poweredOff");
     await adapter.bluetoothAdapterStateWrite;
     expect(stateWrites.callCount).to.equal(writesBeforeShutdown);
+  });
+
+  it("keeps the internal stop status while showing a friendly status", async () => {
+    const { adapter, stateWrites } = createHarness();
+    adapter.unloading = true;
+
+    await adapter.updateBluetoothSearchReadiness();
+
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothSearchReadiness"),
+    ).to.equal("The adapter is stopping.");
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothSearchReadinessDisplay"),
+    ).to.equal("The adapter is stopping.");
   });
 
   it("logs connection errors without exposing configured PINs", async () => {
@@ -339,6 +583,12 @@ describe("manual Bluetooth search", () => {
     expect(lastStateValue(stateWrites, "info.bluetoothScanResults")).to.contain(
       "unauthorized",
     );
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothScanResultsDisplay"),
+    ).to.equal("The local Bluetooth adapter is not ready.");
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothAdapterStateDisplay"),
+    ).to.equal("Bluetooth access is not allowed.");
     sinon.assert.calledWithMatch(
       adapter.log.warn,
       sinon.match((message: string) => message.includes("unauthorized")),
@@ -373,6 +623,11 @@ describe("manual Bluetooth search", () => {
     expect(finalState).to.contain(
       "does not establish whether a charger is available",
     );
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothScanResultsDisplay"),
+    ).to.equal(
+      "No Easee charger was detected. It may be out of range or not ready for Bluetooth.",
+    );
     const infoMessages = adapter.log.info
       .getCalls()
       .map((call) => call.args[0] as string);
@@ -394,7 +649,11 @@ describe("manual Bluetooth search", () => {
 
   it("reports Easee manufacturer-signature matches without exposing advertisement data", async () => {
     const candidates: BluetoothCandidate[] = [
-      { id: "easee-ble-id", name: "TEST0001", connectable: true },
+      {
+        id: "58:BF:25:22:05:3A",
+        name: "TEST0001 EMX123456 secret-pin",
+        connectable: true,
+      },
     ];
     const { adapter, scanner, stateWrites } = createHarness(
       "poweredOn",
@@ -407,7 +666,7 @@ describe("manual Bluetooth search", () => {
         options?: BluetoothDiscoveryOptions,
       ) => {
         options?.onAdvertisement?.({
-          name: "TEST0001",
+          name: "TEST0001 EMX123456 secret-pin",
           serviceUuids: [],
           connectable: true,
           easeeManufacturerMatch: true,
@@ -425,10 +684,19 @@ describe("manual Bluetooth search", () => {
     ) as string;
     expect(finalState).to.contain("Found 1 matching advertisement");
     expect(finalState).to.contain(
-      "TEST0001 [connectable; service UUIDs: none; manufacturer ID 3118: match]",
+      "TEST0001 EMX123456 [redacted] [connectable; service UUIDs: none; manufacturer ID 3118: match]",
     );
+    expect(finalState).to.contain("58:BF:25:22:05:3A");
+    expect(finalState).not.to.contain("secret-pin");
     expect(finalState).not.to.contain("manufacturerData");
     expect(finalState).not.to.contain("de ad");
+    const infoMessages = adapter.log.info
+      .getCalls()
+      .map((call) => call.args[0] as string)
+      .join(" ");
+    expect(infoMessages).to.contain("TEST0001 [redacted] [redacted]");
+    expect(infoMessages).not.to.contain("EMX123456");
+    expect(infoMessages).not.to.contain("secret-pin");
   });
 
   it("shows names, connectability and service UUIDs for nonmatching advertisements", async () => {
@@ -462,6 +730,11 @@ describe("manual Bluetooth search", () => {
       "TEST0001 [not connectable; service UUIDs: 180f; manufacturer ID 3118: no match]",
     );
     expect(finalState).not.to.contain("secret-pin");
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothScanResultsDisplay"),
+    ).to.equal(
+      "Bluetooth devices were detected, but no Easee charger was recognized. The charger may be out of range or not ready for Bluetooth.",
+    );
     expect(
       (scanner.discover.firstCall.args[2] as BluetoothDiscoveryOptions)
         .scanWithoutServiceFilter,
@@ -511,6 +784,19 @@ describe("manual Bluetooth search", () => {
     expect(liveResults.at(-1)).to.contain(
       "TEST0001 [connectable; service UUIDs: none; manufacturer ID 3118: no match]",
     );
+    const liveDisplay = stateWrites
+      .getCalls()
+      .filter(
+        (call) =>
+          call.args[0] === "info.bluetoothScanResultsDisplay" &&
+          typeof call.args[1] === "string" &&
+          call.args[1].startsWith("Searching"),
+      )
+      .at(-1)?.args[1] as string;
+    expect(liveDisplay).to.equal(
+      "Searching for nearby Easee chargers. Please wait up to 30 seconds.",
+    );
+    expect(liveDisplay).not.to.contain("advertisement");
     expect(adapter.bluetoothManualScanInFlight).to.equal(true);
     expect(scanner.discover.firstCall.args[1]).to.equal(30000);
 
@@ -530,6 +816,11 @@ describe("manual Bluetooth search", () => {
     });
     expect(lastStateValue(stateWrites, "info.bluetoothScanResults")).to.contain(
       "scan permission denied",
+    );
+    expect(
+      lastStateValue(stateWrites, "info.bluetoothScanResultsDisplay"),
+    ).to.equal(
+      "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
     );
     sinon.assert.calledOnce(adapter.log.warn);
     sinon.assert.calledOnce(adapter.scheduleBluetoothPoll);
@@ -587,7 +878,7 @@ describe("manual Bluetooth search", () => {
     expect(await adapter.runBluetoothManualScan()).to.deep.equal({
       error: "busy",
     });
-    expect(stateWrites.lastCall.args[1]).to.contain(
+    expect(lastStateValue(stateWrites, "info.bluetoothScanResults")).to.contain(
       "Bluetooth reconnection is active",
     );
     expect(
@@ -640,7 +931,7 @@ describe("manual Bluetooth search", () => {
     expect(await adapter.runBluetoothManualScan()).to.deep.equal({
       error: "busy",
     });
-    expect(stateWrites.lastCall.args[1]).to.contain(
+    expect(lastStateValue(stateWrites, "info.bluetoothScanResults")).to.contain(
       "Bluetooth current update is pending or active",
     );
     sinon.assert.notCalled(scanner.discover);

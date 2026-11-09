@@ -25,7 +25,18 @@ moduleLoader._load = function (
   isMain: boolean,
 ) {
   if (request === "@iobroker/adapter-core") {
-    return { Adapter: class {} };
+    return {
+      Adapter: class {},
+      I18n: {
+        init: () => Promise.resolve(),
+        t: (key: string, ...args: (string | number | boolean | null)[]) =>
+          args.reduce<string>(
+            (text, arg) =>
+              text.replace("%s", arg === null ? "null" : String(arg)),
+            key,
+          ),
+      },
+    };
   }
   const loaded = originalLoad.call(this, request, parent, isMain);
   if (
@@ -88,6 +99,8 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
   adapter.chargerSessionAuthTokenResolved = new Set();
   adapter.pendingSessionAuthTokenLookups = new Map();
   adapter.chargerIds = [];
+  adapter.namespace = "easee.0";
+  adapter.reconcileModeSpecificObjects = sinon.stub().resolves();
   adapter.chargerNameQueue = Promise.resolve();
   adapter.chargerNameVersions = new Map();
   adapter.chargerNamePending = new Map();
@@ -160,6 +173,41 @@ function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
   adapter.scheduleBluetoothPoll = sinon.stub();
   adapter.scheduleBluetoothReconnect = sinon.stub();
   return adapter;
+}
+
+function attachObjectStore(
+  adapter: ReturnType<typeof createAdapter>,
+): Map<
+  string,
+  { type: string; common?: Record<string, unknown>; native?: unknown }
+> {
+  const objects = new Map<
+    string,
+    { type: string; common?: Record<string, unknown>; native?: unknown }
+  >();
+  adapter.setObjectNotExistsAsync = sinon.stub().callsFake((id, object) => {
+    if (!objects.has(id)) {
+      objects.set(id, object);
+    }
+    return Promise.resolve();
+  });
+  adapter.getObjectViewAsync = sinon
+    .stub()
+    .callsFake((_design: string, search: string) => {
+      const objectType = search === "device" ? "device" : "state";
+      return Promise.resolve({
+        rows: [...objects.entries()]
+          .filter(([, object]) => object.type === objectType)
+          .map(([id, value]) => ({ id: `${adapter.namespace}.${id}`, value })),
+      });
+    });
+  adapter.delObjectAsync = sinon.stub().callsFake((id: string) => {
+    objects.delete(id);
+    return Promise.resolve();
+  });
+  adapter.extendObjectAsync = sinon.stub().resolves();
+  adapter.subscribeStates = sinon.stub();
+  return objects;
 }
 
 describe("Bluetooth startup shutdown races", () => {
@@ -561,6 +609,144 @@ describe("Charger name updates", () => {
       );
     });
   }
+});
+
+describe("Cloud site responses", () => {
+  afterEach(() => sinon.restore());
+
+  function adapterWithSiteResponse(
+    data: unknown,
+  ): ReturnType<typeof createAdapter> {
+    const adapter = createAdapterHarness();
+    adapter.getChargerSite = createAdapter.Easee.prototype.getChargerSite;
+    adapter.requestWithBackoff = sinon.stub().resolves({ data });
+    return adapter;
+  }
+
+  it("preserves valid site and circuit data", async () => {
+    const response = {
+      id: "site-1",
+      currencyId: "EUR",
+      costPerKWh: 0.5,
+      costPerKwhExcludeVat: 0.4,
+      vat: 25,
+      circuits: [{ id: "circuit-1", chargers: [{ id: "charger-1" }] }],
+    };
+    const adapter = adapterWithSiteResponse(response);
+
+    expect(await adapter.getChargerSite("charger-1")).to.deep.equal(response);
+  });
+
+  it("normalizes finite numeric site, circuit, and charger IDs", async () => {
+    const adapter = adapterWithSiteResponse({
+      id: 123,
+      currencyId: " NOK ",
+      costPerKWh: 1.5,
+      costPerKwhExcludeVat: 1.2,
+      vat: 25,
+      circuits: [{ id: 456, chargers: [{ id: 789 }] }],
+    });
+
+    expect(await adapter.getChargerSite("789")).to.deep.equal({
+      id: "123",
+      currencyId: "NOK",
+      costPerKWh: 1.5,
+      costPerKwhExcludeVat: 1.2,
+      vat: 25,
+      circuits: [{ id: "456", chargers: [{ id: "789" }] }],
+    });
+  });
+
+  it("accepts missing site fields and sanitizes incomplete optional circuits", async () => {
+    const adapter = adapterWithSiteResponse({
+      currencyId: 42,
+      costPerKWh: "1.5",
+      costPerKwhExcludeVat: -1,
+      vat: 100,
+      circuits: [
+        { id: 456, chargers: [{ id: "charger-1" }, { id: null }] },
+        { id: Infinity, chargers: "invalid" },
+        null,
+      ],
+    });
+
+    expect(await adapter.getChargerSite("charger-1")).to.deep.equal({
+      circuits: [{ id: "456" }, {}, {}],
+    });
+  });
+
+  for (const data of [null, 123, true, []]) {
+    it(`returns no site data for a non-object response: ${String(data)}`, async () => {
+      const adapter = adapterWithSiteResponse(data);
+
+      expect(await adapter.getChargerSite("charger-1")).to.equal(undefined);
+    });
+  }
+
+  it("declines a site write when optional circuit data is incomplete", async () => {
+    const adapter = adapterWithSiteResponse({
+      id: "site-1",
+      circuits: [{ id: 456, chargers: [{ id: "charger-1" }, {}] }],
+    });
+    const get = sinon.stub(axios, "get");
+    const put = sinon.stub(axios, "put");
+
+    let failure: unknown;
+    try {
+      await adapter.changeChargerName("charger-1", "New", 1);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).to.be.instanceOf(Error);
+    expect((failure as Error).message).to.equal(
+      "Could not uniquely identify the charger circuit",
+    );
+    expect(get.called || put.called).to.equal(false);
+  });
+
+  it("reports a clear failure for a site command without site data", async () => {
+    const adapter = adapterWithSiteResponse(null);
+
+    let failure: unknown;
+    try {
+      await adapter.changeChargerName("charger-1", "New", 1);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect((failure as Error).message).to.equal(
+      "No site data available for charger charger-1",
+    );
+  });
+
+  it("continues Cloud state and config updates when the site response is not an object", async () => {
+    const adapter = adapterWithSiteResponse(null);
+    adapter.config = { signalR: false };
+    adapter.refreshToken = sinon.stub().resolves();
+    adapter.getAllCharger = sinon.stub().resolves([{ id: "charger-1" }]);
+    adapter.setAllStatusObjects = sinon.stub().resolves();
+    adapter.setAllConfigObjects = sinon.stub().resolves();
+    adapter.subscribeChargerToSignalR = sinon.stub().resolves();
+    adapter.getChargerState = sinon
+      .stub()
+      .resolves({ state: {}, timestamps: {} });
+    adapter.getChargerConfig = sinon.stub().resolves({});
+    adapter.setNewStatusToCharger = sinon.stub().resolves();
+    adapter.setConfigStatus = sinon.stub().resolves();
+
+    await adapter.readAllStates();
+
+    expect(adapter.setNewStatusToCharger.calledOnce).to.equal(true);
+    expect(
+      adapter.setConfigStatus.calledOnceWithExactly(
+        { id: "charger-1", name: "charger-1" },
+        {},
+        undefined,
+      ),
+    ).to.equal(true);
+    await new Promise<void>((resolve) => adapter.onUnload(resolve));
+  });
 });
 
 describe("Easee polling regressions", () => {
@@ -2240,6 +2426,224 @@ describe("Easee polling regressions", () => {
 
       expect(adapter.startCharging.called).to.equal(false);
       expect(adapter.setStateAsync.called).to.equal(false);
+    });
+  });
+
+  describe("Connection-mode datapoints", () => {
+    afterEach(() => sinon.restore());
+
+    it("keeps supported states and removes stale mode-specific states on switches", async () => {
+      const adapter = createAdapterHarness();
+      adapter.reconcileModeSpecificObjects =
+        createAdapter.Easee.prototype.reconcileModeSpecificObjects.bind(
+          adapter,
+        );
+      const objects = attachObjectStore(adapter);
+      objects.set("userDevice", {
+        type: "device",
+        common: { name: "User device" },
+      });
+      objects.set("userDevice.status.authToken", {
+        type: "state",
+        common: { name: "User data" },
+      });
+      objects.set("userDevice.info.bluetoothRSSI", {
+        type: "state",
+        common: { name: "User data" },
+      });
+      objects.set("charger.userCreated", {
+        type: "state",
+        common: { name: "User data" },
+      });
+      objects.set("charger.status.chargerOpMode", {
+        type: "state",
+        common: { name: "Customized operation mode" },
+        native: { preserve: true },
+      });
+
+      const staleCloudIds = [
+        "lastUpdate",
+        "info.sessionPollLastRequest",
+        "charger.control.start",
+        "charger.control.stop",
+        "charger.status.cableLocked",
+        "charger.status.authToken",
+        "charger.status.authTokenName",
+        "charger.status.wiFiRSSI",
+        "charger.status.chargerFirmware",
+        "charger.status.outputCurrent",
+        "charger.status.inVoltageT1T2",
+        "charger.status.inVoltageT1T3",
+        "charger.status.inVoltageT1T4",
+        "charger.status.inVoltageT1T5",
+        "charger.status.isOnline",
+        "charger.status.wiFiAPEnabled",
+        "charger.status.TempMax",
+        "charger.config.costPerKWh",
+        "charger.config.costPerKwhExcludeVat",
+        "charger.config.vat",
+        "charger.config.smartCharging",
+        "charger.config.smartButtonEnabled",
+        "charger.session.2025.total_year",
+        "charger.session.2025.3.totalEnergyUsage",
+        "charger.session.2025.3.totalCost",
+      ];
+      for (const id of [
+        ...staleCloudIds,
+        "info.bluetoothAdapterState",
+        "info.bluetoothSearchReadiness",
+      ]) {
+        objects.set(id, { type: "state" });
+      }
+
+      adapter.connectionMode = "bluetooth";
+      await adapter.setAllStatusObjects({ id: "charger", name: "Charger" });
+      await adapter.setAllConfigObjects({ id: "charger", name: "Charger" });
+      await adapter.setBluetoothInfoObjects({
+        id: "charger",
+        name: "Charger",
+      });
+      const bluetoothCreatedIds = adapter.setObjectNotExistsAsync.args.map(
+        (args: unknown[]) => args[0] as string,
+      );
+      for (const id of staleCloudIds.filter((id) =>
+        id.startsWith("charger."),
+      )) {
+        expect(bluetoothCreatedIds).not.to.include(id);
+      }
+      await adapter.reconcileModeSpecificObjects();
+      const bluetoothStates = new Set(
+        [...objects.entries()]
+          .filter(([, object]) => object.type === "state")
+          .map(([id]) => id),
+      );
+      for (const id of [
+        "charger.id",
+        "charger.name",
+        "charger.status.chargerOpMode",
+        "charger.status.reasonForNoCurrent",
+        "charger.status.totalPower",
+        "charger.status.inCurrentT3",
+        "charger.status.inVoltageT2T3",
+        "charger.status.voltage",
+        "charger.status.ledMode",
+        "charger.status.lifetimeEnergy",
+        "charger.config.isEnabled",
+        "charger.config.phaseMode",
+        "charger.config.maxChargerCurrent",
+        "charger.config.dynamicChargerCurrent",
+        "charger.config.dynamicCircuitCurrentP1",
+        "charger.config.circuitMaxCurrentP1",
+        "charger.config.ledStripBrightness",
+        "charger.config.lockCablePermanently",
+        "charger.config.wiFiSSID",
+        "charger.info.bluetoothConnection",
+        "charger.info.bluetoothError",
+        "charger.info.bluetoothRSSI",
+        "info.bluetoothAdapterState",
+        "info.bluetoothSearchReadiness",
+        "charger.userCreated",
+        "userDevice.status.authToken",
+      ]) {
+        expect(
+          bluetoothStates.has(id),
+          `${id} should remain in Bluetooth mode`,
+        ).to.equal(true);
+      }
+      for (const id of staleCloudIds) {
+        expect(
+          bluetoothStates.has(id),
+          `${id} should be absent in Bluetooth mode`,
+        ).to.equal(false);
+      }
+      expect(bluetoothStates.has("userDevice.info.bluetoothRSSI")).to.equal(
+        true,
+      );
+      expect(objects.get("charger.status.chargerOpMode")).to.deep.include({
+        common: { name: "Customized operation mode" },
+        native: { preserve: true },
+      });
+      expect(
+        adapter.extendObjectAsync.calledWith("charger.name", {
+          common: { role: "text", write: false },
+        }),
+      ).to.equal(true);
+      expect(
+        adapter.extendObjectAsync.calledWith("charger.config.wiFiSSID", {
+          common: { read: true, write: false },
+        }),
+      ).to.equal(true);
+
+      adapter.connectionMode = "cloud";
+      await adapter.setAllStatusObjects({ id: "charger", name: "Charger" });
+      await adapter.setAllConfigObjects({ id: "charger", name: "Charger" });
+      for (const id of [
+        "lastUpdate",
+        "info.sessionPollLastRequest",
+        "info.bluetoothAdapterState",
+        "info.bluetoothAdapterStateDisplay",
+        "info.bluetoothSearchReadiness",
+        "info.bluetoothSearchReadinessDisplay",
+        "info.bluetoothScanResults",
+        "info.bluetoothScanResultsDisplay",
+        "charger.session.2025.3.totalCost",
+      ]) {
+        objects.set(id, { type: "state" });
+      }
+      await adapter.reconcileModeSpecificObjects();
+
+      const cloudStates = new Set(
+        [...objects.entries()]
+          .filter(([, object]) => object.type === "state")
+          .map(([id]) => id),
+      );
+      for (const id of [
+        "lastUpdate",
+        "info.sessionPollLastRequest",
+        "charger.control.start",
+        "charger.control.stop",
+        "charger.status.authToken",
+        "charger.status.authTokenName",
+        "charger.status.cableLocked",
+        "charger.status.TempMax",
+        "charger.config.costPerKWh",
+        "charger.config.smartCharging",
+        "charger.config.wiFiSSID",
+        "charger.session.2025.3.totalCost",
+        "charger.userCreated",
+        "userDevice.info.bluetoothRSSI",
+      ]) {
+        expect(
+          cloudStates.has(id),
+          `${id} should remain in Cloud mode`,
+        ).to.equal(true);
+      }
+      for (const id of [
+        "info.bluetoothAdapterState",
+        "info.bluetoothAdapterStateDisplay",
+        "info.bluetoothSearchReadiness",
+        "info.bluetoothSearchReadinessDisplay",
+        "info.bluetoothScanResults",
+        "info.bluetoothScanResultsDisplay",
+        "charger.info.bluetoothConnection",
+        "charger.info.bluetoothError",
+        "charger.info.bluetoothRSSI",
+      ]) {
+        expect(
+          cloudStates.has(id),
+          `${id} should be absent in Cloud mode`,
+        ).to.equal(false);
+      }
+      expect(
+        adapter.extendObjectAsync.calledWith("charger.name", {
+          common: { role: "text", write: true },
+        }),
+      ).to.equal(true);
+      expect(
+        adapter.extendObjectAsync.calledWith("charger.config.wiFiSSID", {
+          common: { read: true, write: true },
+        }),
+      ).to.equal(true);
     });
   });
 

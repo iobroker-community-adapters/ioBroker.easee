@@ -24,52 +24,58 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 ## Help
 
-The adapter can use either the existing Easee Cloud connection or a local
-Bluetooth connection. See the [Bluetooth setup, datapoint mapping, and
-limitations](./docs/bluetooth.md) before enabling Bluetooth mode.
-In Bluetooth mode, chargers can be added and removed individually in the
-ioBroker Device Manager. The settings page shows the local Bluetooth adapter
-state, whether a manual search can currently start, and offers a 30-second
-manual search with live results; results are not added automatically. These
-statuses do not confirm that a charger is nearby or advertising. Bluetooth
-settings offer Automatic, BlueZ D-Bus, and Raw HCI; on Linux, Raw HCI requires
-`CAP_NET_RAW` and can conflict with BlueZ or other scanners. Manual BLE searches
-recognize the Easee service UUID or manufacturer ID 3118 and never add results
-to configuration. Raw HCI requests ATT MTU 333 and negotiates the effective MTU
-as `min(333, peer MTU)`. This lets the 330-byte HELLO plus its 3-byte ATT header
-fit one normal Write Request only when the peer supports MTU 333 or higher; a
-lower peer MTU still uses Noble's long-write path. Non-security ATT errors in
-that path are surfaced to the write callback and pending chunks are cleared.
-A Raspberry Pi Raw-HCI test completed the HELLO handshake and authenticated
-config/state reads; this confirms the tested setup only.
-The Bluetooth guide also explains how to collect matching adapter, `btmon`, and
-BlueZ logs for Linux connection troubleshooting. See the
-[Bluetooth guide](./docs/bluetooth.md) for setup and limitations.
+### Connection mode
 
-`status.authToken` and `status.authTokenName` are cleared when charging starts (Easee Observation 109). The API does not provide the token at session start. The adapter checks for a completed session when the charger enters Completed mode or the car disconnects. Once Easee returns a token, it is stored in `status.authToken`; the adapter looks up the key owner in the logged-in account's Easee Keys and writes the name to `status.authTokenName`. The name is `unknown` if no matching name is available or the lookup fails. Both states remain empty until a token is available. Keys belonging to other accounts may not be resolvable.
+Cloud is the default connection mode. Choose **Easee Cloud** or
+**Bluetooth (local)** in the adapter settings. Cloud mode uses your Easee
+account. Bluetooth mode connects directly to chargers configured in the
+Device Manager on the Connection tab; it does not log in to Cloud or switch to
+Cloud automatically. Enter each charger's serial number and Bluetooth PIN (not
+your Easee account password), then save the settings and restart the adapter.
+An optional name is only an ioBroker label. The PIN is stored encrypted in the
+adapter configuration.
 
-`status.chargerOpMode` reports the charger's operation mode (Easee Observation 109):
+The charger must be in Bluetooth range and available for a local connection.
+The **Advanced Bluetooth functions** tab shows Bluetooth status and
+connection method and offers an optional manual search. Search results do not configure chargers or
+replace the required serial number and PIN. Bluetooth mode does not provide
+Cloud-only information such as site prices, session history, or authorization
+token details. Only datapoints supported by the selected connection mode are
+exposed; unsupported adapter-created datapoints are removed after switching
+modes. For setup, compatibility, and troubleshooting, see the
+[Bluetooth guide](./docs/bluetooth.md).
 
-| Value | Mode | Description |
-| ---: | --- | --- |
-| 0 | Offline | Charger is offline. |
-| 1 | Disconnected | No car is connected. |
-| 2 | Awaiting Start | A car is connected; the charger is waiting for the EV or load balancing. |
-| 3 | Charging | The car is charging. |
-| 4 | Completed | The car has paused or stopped charging. |
-| 5 | Error | The charger has an error. |
-| 6 | Ready to Charge | The charger is waiting for the car to take energy. |
-| 7 | Awaiting Authentication | The charger is waiting for authentication. |
-| 8 | De-authenticating | The charger is de-authenticating. |
+### Charger status and controls
 
-The `<chargerId>.name` state can be written to change the charger name in Easee. The adapter reads the charger's circuit and submits its complete charger list to Easee, then confirms the state only when the name is returned by the API. The Easee account must have permission to update chargers on the site. Since Easee does not document all update semantics, test this feature on a test site first and check the adapter log if the update is rejected or not confirmed.
+`<chargerId>.status.chargerOpMode` shows the current charging state:
 
-In Cloud mode, all `dynamicCircuitCurrentPX` phases must be set within 500 ms
-otherwise an unset phase is sent as 0. In Bluetooth mode, phase writes are
-batched for 500 ms and the adapter reads the other current phase values before
-sending all three; it refuses the write if those values are unavailable.
+| Value | State |
+| ---: | --- |
+| 0 | Offline |
+| 1 | Disconnected |
+| 2 | Waiting to start |
+| 3 | Charging |
+| 4 | Paused or completed |
+| 5 | Error |
+| 6 | Ready to charge |
+| 7 | Waiting for authentication |
+| 8 | Ending authentication |
 
-Session polling can run automatically at a recommended interval of seven minutes per detected charger, or use a manually selected interval per charger. The Admin configuration shows the detected charger count, recommendation, and effective interval. Manual values below the recommendation are raised automatically to preserve the API rate limit. The last session request time is retained across adapter restarts.
+In Cloud mode, Easee may provide an authorization token after a charging
+session in `status.authToken`. When the token matches a key in your Easee account,
+`status.authTokenName` shows the key owner's name; otherwise it shows
+`unknown`. Both states remain empty until a token is available.
+
+In Cloud mode, write a new name to `<chargerId>.name` to rename a charger. Your
+Easee account must have permission to change chargers on the site.
+
+`config.dynamicCircuitCurrentP1`–`P3` set the current limit for each phase. In
+Cloud mode, update all phase values together. Bluetooth mode reads the other
+phase values before applying a change and rejects it if they are unavailable.
+
+Cloud session polling is automatic by default. You can set a separate interval
+per charger in Admin; very short intervals are adjusted to avoid excessive
+requests.
 
 ## Credits
 
@@ -81,22 +87,10 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
-- (Voodoo2man) Raw HCI MTU 333 completed the HELLO handshake and authenticated reads in a Raspberry Pi test.
-- Added a Raw-HCI-only retry for incomplete GATT characteristic discovery after a 250 ms quiet window.
-- (Voodoo2man) Expanded payload-free Bluetooth diagnostics with GATT characteristic UUIDs/properties, notification and write outcomes, specific HCI failure categories, and Linux trace collection guidance.
-- (Voodoo2man) Bluetooth configuration diagnostics now identify invalid stored fields without exposing secrets and are visible in the Device Manager.
-- (Voodoo2man) Bluetooth chargers were made individually manageable in the ioBroker Device Manager.
-- (Voodoo2man) Added an optional local Bluetooth connection mode with configured chargers and PINs.
-- (Voodoo2man) Corrected circuit phase reporting and command acknowledgements, and reject unsafe external charger IDs.
-- (Voodoo2man) Improved Cloud polling recovery and status reporting, retained session authorization details across restarts, and coordinated Bluetooth searches with pending and active writes.
-- (Voodoo2man) Added live Bluetooth search readiness to adapter settings and improved PIN-redacted scan and connection diagnostics.
-- (Voodoo2man) Added an Admin setting to select Automatic, BlueZ D-Bus, or Raw HCI for Bluetooth connections.
-- (Voodoo2man) Added exact configured-serial BLE name fallback with GATT validation and extended manual search to 30 seconds with live results.
-- (Voodoo2man) Matched manual BLE searches against Easee's manufacturer signature, added best-effort macOS and opt-in raw-HCI fallbacks for chargers missing notification descriptors, and logged the selected Noble binding at startup.
-- (Voodoo2man) Linux Bluetooth now uses BlueZ D-Bus by default, preserves Noble binding overrides, skips reliably reported non-connectable advertisements, and treats D-Bus connectability as unknown.
-- (Voodoo2man) Linux BlueZ now pairs once after an ATT authentication error and retries the affected GATT write once, only when the advertised charger name exactly matches its configured serial.
-- (Voodoo2man) Manual BLE searches reset reconnect backoff so cancelled retries do not delay the next automatic charger connection attempt.
-- (Voodoo2man) Hardened transient Cloud retries and invalid-session handling; corrected an Admin translation JSON error; and added regression coverage for serialized writes and BLE scan shutdown.
+- (Voodoo2man) Added optional local Bluetooth connectivity as an alternative to Cloud, with per-charger setup, device discovery, and an integrated Device Manager in adapter settings.
+- (Voodoo2man) Improved Cloud status and session updates, including when site information is unavailable.
+- (Voodoo2man) Improved charger control reliability for current limits and commands.
+- Exposed only datapoints supported by the selected Cloud or Bluetooth connection mode and removed unsupported adapter-created datapoints after switching modes.
 
 ### 3.2.0 (2026-11-07)
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
@@ -109,13 +103,12 @@ This adapter would not have been possible without the great work of @Newan (http
 - (Voodoo2man) Improved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.
 
 ### 3.0.0 (2026-10-23)
-- (Voodoo2man) Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required
-- (Voodoo2man) Updated adapter tooling, Admin configuration, and runtime metadata
+- (Voodoo2man) Raised the minimum Node.js version to 22.19.0.
 
 ### 2.0.0 (2026-10-18)
-- (Voodoo2man) Improved charger status and connectivity handling with the Observations API, SignalR resilience, bounded polling, and API retries, incorporating contributions from @Voodoo2man, @Michaelnorge, @Codibris, and @m1chel87, with earlier Node.js and JSON-config groundwork from @NCIceWolf.
-- (Voodoo2man) Improved circuit-current update reliability and added configurable, rate-limit-aware session polling across chargers.
-- (Voodoo2man) Added configurable net charging prices and VAT with synchronized gross prices.
+- (Voodoo2man) Improved charger status updates and recovery after connection interruptions, with contributions from @Michaelnorge, @Codibris, and @m1chel87 and earlier compatibility work by @NCIceWolf.
+- (Voodoo2man) Improved circuit-current controls and added configurable session updates across chargers.
+- (Voodoo2man) Added configurable charging costs, including VAT.
 
 ### 2.0.0-alpha.1 (2026-10-17)
 - (mcm1957) Adapter has been migrated into the iobroker-community-adapter-organisation

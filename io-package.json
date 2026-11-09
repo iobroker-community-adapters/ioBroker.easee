@@ -100,17 +100,17 @@
       }
     },
     "titleLang": {
-      "en": "Easee Wallbox API",
-      "de": "Easee Wallbox API",
-      "ru": "API-интерфейс Easy Wallbox",
-      "pt": "API Easee Wallbox",
-      "nl": "Easee Wallbox-API",
-      "fr": "API Easee Wallbox",
-      "it": "Facilita l'API Wallbox",
-      "es": "Easee Wallbox API",
-      "pl": "Easee Wallbox API",
-      "uk": "Easee Wallbox API",
-      "zh-cn": "Easee Wallbox API"
+      "en": "Easee Wallbox API/BLE",
+      "de": "Easee Wallbox API/BLE",
+      "ru": "Easee Wallbox API/BLE",
+      "pt": "Easee Wallbox API/BLE",
+      "nl": "Easee Wallbox API/BLE",
+      "fr": "Easee Wallbox API/BLE",
+      "it": "Easee Wallbox API/BLE",
+      "es": "Easee Wallbox API/BLE",
+      "pl": "Easee Wallbox API/BLE",
+      "uk": "Easee Wallbox API/BLE",
+      "zh-cn": "Easee Wallbox API/BLE"
     },
     "desc": {
       "en": "Communicates with Easee wallboxes via the Easee Cloud API or local Bluetooth",
