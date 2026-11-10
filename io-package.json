@@ -5,8 +5,21 @@
       "custom": true,
       "deviceManager": true
     },
-    "version": "3.2.0",
+    "version": "4.0.0",
     "news": {
+      "4.0.0": {
+        "en": "Added optional local Bluetooth connectivity alongside Cloud, with charger discovery and setup through the Device Manager.\nImproved Cloud status and session updates, charger controls, and Bluetooth charger configuration saving.",
+        "de": "Optionale lokale Bluetooth-Verbindung mit Cloud, Ladegerätsuche und Einrichtung im Gerätemanager.\nVerbesserte Cloud-Status- und Sitzungsupdates, Ladesteuerung und Speicherung der Bluetooth-Ladekonfiguration.",
+        "ru": "Наряду с облаком добавлено дополнительное локальное подключение по Bluetooth с обнаружением и настройкой зарядного устройства через диспетчер устройств.\nУлучшенное обновление состояния облака и сеансов, управление зарядным устройством и сохранение конфигурации зарядного устройства Bluetooth.",
+        "pt": "Foi adicionada conectividade Bluetooth local opcional além da conexão com a nuvem, com descoberta e configuração dos carregadores pelo Device Manager.\nForam melhoradas as atualizações do status na nuvem e das sessões, os controles dos carregadores e o armazenamento da configuração Bluetooth.",
+        "nl": "Optionele lokale Bluetooth-connectiviteit toegevoegd naast de cloud, met detectie en configuratie van de oplader via de apparaatbeheerder.\nVerbeterde cloudstatus- en sessie-updates, bediening van de oplader en het opslaan van de Bluetooth-configuratie.",
+        "fr": "Ajout de la connectivité Bluetooth locale en option au Cloud, avec détection du chargeur et configuration via le Device Manager.\nMise à jour de l'état et des sessions du Cloud, commandes du chargeur et sauvegarde de la configuration du chargeur Bluetooth.",
+        "it": "Aggiunta la connettività Bluetooth locale opzionale accanto a quella cloud, con rilevamento e configurazione dei caricabatterie tramite il Device Manager.\nMigliorati gli aggiornamenti dello stato cloud e delle sessioni, i controlli dei caricabatterie e il salvataggio della configurazione Bluetooth dei caricabatterie.",
+        "es": "Se añadió conectividad Bluetooth local opcional además de la conexión en la nube, con detección y configuración de cargadores mediante el administrador de dispositivos.\nSe mejoraron las actualizaciones del estado en la nube y de las sesiones, los controles de los cargadores y el guardado de la configuración Bluetooth.",
+        "pl": "Dodano opcjonalną lokalną łączność Bluetooth wraz z chmurą, z wykrywaniem i konfiguracją ładowarki za pośrednictwem Menedżera urządzeń.\nPoprawiono aktualizacje stanu i sesji w chmurze, sterowanie ładowarką i zapisywanie konfiguracji ładowarki Bluetooth.",
+        "uk": "Додано додаткове локальне підключення Bluetooth поряд із хмарою, з виявленням та налаштуванням зарядного пристрою через диспетчер пристроїв.\nПокращено оновлення стану хмари та сеансів, управління зарядним пристроєм та збереження конфігурації зарядного пристрою Bluetooth.",
+        "zh-cn": "除了云端之外，还增加了可选的本地蓝牙连接，可通过设备管理器发现和设置充电器。\n改进了云端状态和会话更新、充电器控制和蓝牙充电器配置保存功能。"
+      },
       "3.2.0": {
         "en": "Added the ability to change the charger name through the writable `<chargerId>.name` state.\nReplaced the adapter icon.\nAdded an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.",
         "de": "Der Name der Ladestation kann über den beschreibbaren Datenpunkt `<chargerId>.name` geändert werden.\nDas Adaptersymbol wurde ersetzt.\nEin Datenpunkt für das Autorisierungstoken wurde hinzugefügt. Er wird bei Ladebeginn geleert und nach der Sitzung gesetzt; der Name des Schlüsselinhabers steht in einem separaten Datenpunkt.",
@@ -84,19 +97,6 @@
         "pl": "Adapter został przeniesiony do organizacji iobroker-community-adapter-organization\nAdapter wymaga teraz node.js >= 22.\nAdapter wymaga kontrolera js->= 7.2.2 teraz\nAdapter wymaga administratora >= 7.7.22 teraz",
         "uk": "Адаптер перенесено в організацію адаптера спільноти iobroker\nТепер адаптер вимагає node.js >= 22.\nАдаптер вимагає js-контролера >= 7.2.2 зараз\nАдаптер вимагає адміністратора >= 7.7.22 зараз",
         "zh-cn": "适配器已迁移到 iobroker 社区适配器组织\n适配器现在需要 node.js >= 22。\n适配器现在需要 js-controller >= 7.2.2\n适配器现在需要管理员 >= 7.7.22"
-      },
-      "1.0.10": {
-        "en": "fix version number",
-        "de": "versionsnummer geändert",
-        "ru": "исправить номер версии",
-        "pt": "corrigir o número da versão",
-        "nl": "vertaling:",
-        "fr": "correction du numéro de version",
-        "it": "numero di versione fix",
-        "es": "número de versión",
-        "pl": "wersja poprawna",
-        "uk": "фіксувати номер версії",
-        "zh-cn": "fix"
       }
     },
     "titleLang": {

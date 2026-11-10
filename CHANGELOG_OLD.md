@@ -1,4 +1,10 @@
 # Older changes
+## 2.0.0-alpha.1 (2026-10-17)
+- (mcm1957) Adapter has been migrated into the iobroker-community-adapter-organisation
+- (iobroker-bot) Adapter requires node.js >= 22 now.
+- (copilot) Adapter requires js-controller >= 7.2.2 now
+- (copilot) Adapter requires admin >= 7.7.22 now
+
 ## 1.0.10 (2023-07-27)
 * (Newan) fix version number
 

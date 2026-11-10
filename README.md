@@ -87,7 +87,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 4.0.0 (2026-11-10)
 - (Voodoo2man) Added optional local Bluetooth connectivity alongside Cloud, with charger discovery and setup through the Device Manager.
 - (Voodoo2man) Improved Cloud status and session updates, charger controls, and Bluetooth charger configuration saving.
 
@@ -108,12 +108,6 @@ This adapter would not have been possible without the great work of @Newan (http
 - (Voodoo2man) Improved charger status updates and recovery after connection interruptions, with contributions from @Michaelnorge, @Codibris, and @m1chel87 and earlier compatibility work by @NCIceWolf.
 - (Voodoo2man) Improved circuit-current controls and added configurable session updates across chargers.
 - (Voodoo2man) Added configurable charging costs, including VAT.
-
-### 2.0.0-alpha.1 (2026-10-17)
-- (mcm1957) Adapter has been migrated into the iobroker-community-adapter-organisation
-- (iobroker-bot) Adapter requires node.js >= 22 now.
-- (copilot) Adapter requires js-controller >= 7.2.2 now
-- (copilot) Adapter requires admin >= 7.7.22 now
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 
