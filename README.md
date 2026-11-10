@@ -87,6 +87,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (Voodoo2man) Limited the displayed charging power to two decimal places in the Device Manager card.
+
 ### 4.0.0 (2026-11-10)
 - (Voodoo2man) Added optional local Bluetooth connectivity alongside Cloud, with charger discovery and setup through the Device Manager.
 - (Voodoo2man) Improved Cloud status and session updates, charger controls, and Bluetooth charger configuration saving.
