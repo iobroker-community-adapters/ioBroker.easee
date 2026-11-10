@@ -91,13 +91,22 @@ const SAFE_BLUEZ_ERROR_CODES = new Set([
   "NotSupported",
 ]);
 
-function errorCategory(errorText: string): string {
+/**
+ * Returns the normalized category for a BLE error message.
+ *
+ * @param errorText Error text to classify.
+ */
+export function getBluetoothErrorCategory(errorText: string): string {
   if (
     /unknown connection identifier|connection handle unknown/i.test(errorText)
   ) {
     return "hci_unknown_connection_identifier";
   }
-  if (/connection failed to be established/i.test(errorText)) {
+  if (
+    /connection failed to be established|disconnected\s+(?:62|0x3e)\b/i.test(
+      errorText,
+    )
+  ) {
     return "hci_connection_failed";
   }
   if (/timed?\s*out|timeout|etimedout/i.test(errorText)) {
@@ -203,7 +212,7 @@ function errorMetadata(error: unknown): {
     .join(" ");
   return {
     name,
-    category: errorCategory(errorText),
+    category: getBluetoothErrorCategory(errorText),
     ...(code ? { code } : {}),
     ...(status !== undefined ? { status: String(status) } : {}),
   };

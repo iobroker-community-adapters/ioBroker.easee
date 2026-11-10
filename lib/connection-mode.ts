@@ -9,6 +9,21 @@ export interface BluetoothChargerConfig {
   name: string;
 }
 
+/** Safe diagnostic data that lets Admin render configuration errors in each locale. */
+export type BluetoothConfigurationErrorDiagnostic =
+  | {
+      type: "validation";
+      field: string;
+      reason: string;
+      entry?: number;
+      setting?: string;
+    }
+  | {
+      type: "message";
+      key: string;
+      parameters?: readonly (string | number)[];
+    };
+
 type BluetoothConfigurationErrorReason =
   | "invalid-json"
   | "not-a-list"
@@ -69,18 +84,26 @@ export class BluetoothConfigurationError extends Error {
   readonly source: BluetoothConfigurationSource;
   readonly messageEn: string;
   readonly messageDe: string;
+  readonly diagnostic?: BluetoothConfigurationErrorDiagnostic;
 
   /**
    * @param message Safe English diagnostic text.
    * @param messageDe Safe German diagnostic text.
    * @param source Whether the diagnostic came from submitted input or stored settings.
+   * @param diagnostic Optional translation details for the Device Manager.
    */
-  constructor(message: string, messageDe: string, source: "input" | "stored") {
+  constructor(
+    message: string,
+    messageDe: string,
+    source: "input" | "stored",
+    diagnostic?: BluetoothConfigurationErrorDiagnostic,
+  ) {
     super(message);
     this.name = "BluetoothConfigurationError";
     this.source = source;
     this.messageEn = message;
     this.messageDe = messageDe;
+    this.diagnostic = diagnostic;
   }
 }
 
@@ -98,6 +121,13 @@ function configurationError(
     `${locationEn}: ${description.en}.`,
     `${locationDe}: ${description.de}.`,
     source,
+    {
+      type: "validation",
+      field,
+      reason: description.en,
+      ...(entry !== undefined ? { entry } : {}),
+      ...(setting !== undefined ? { setting } : {}),
+    },
   );
 }
 

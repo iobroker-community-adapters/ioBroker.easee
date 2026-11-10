@@ -7,6 +7,8 @@ import { describe, it } from "mocha";
 import { createDecipheriv } from "node:crypto";
 import { BluetoothHandshake } from "../lib/bluetooth-protocol.ts";
 import { BluetoothClient } from "../lib/bluetooth-client.ts";
+import type { BluetoothStatusEvent } from "../lib/bluetooth-client.ts";
+import { MAX_NODE_TIMEOUT_MS } from "../lib/timeout.ts";
 import type {
   BluetoothCandidate,
   BluetoothDiscoveryOptions,
@@ -348,6 +350,39 @@ function client(
 }
 
 describe("Bluetooth client boundary", () => {
+  it("rejects timeout values that exceed Node timer limits", () => {
+    const scanner = new FakeScanner();
+    const devices = [
+      { serial: "EMX12345", pin: "1234", name: "Garage charger" },
+    ];
+    const maxDiscoveryTimeout = MAX_NODE_TIMEOUT_MS - 1000;
+
+    expect(
+      () =>
+        new BluetoothClient(devices, scanner, {
+          discoveryTimeoutMs: maxDiscoveryTimeout,
+        }),
+    ).not.to.throw();
+    expect(
+      () =>
+        new BluetoothClient(devices, scanner, {
+          discoveryTimeoutMs: maxDiscoveryTimeout + 1,
+        }),
+    ).to.throw(RangeError);
+    expect(
+      () =>
+        new BluetoothClient(devices, scanner, {
+          requestTimeoutMs: MAX_NODE_TIMEOUT_MS,
+        }),
+    ).not.to.throw();
+    expect(
+      () =>
+        new BluetoothClient(devices, scanner, {
+          setupTimeoutMs: MAX_NODE_TIMEOUT_MS + 1,
+        }),
+    ).to.throw(RangeError);
+  });
+
   it("closes an active discovery scan immediately when stopping", async () => {
     const scanner = new PendingDiscoveryScanner();
     const instance = new BluetoothClient(
@@ -749,6 +784,69 @@ describe("Bluetooth client boundary", () => {
     expect(scanner.discoveryCalls).to.equal(2);
     expect(statuses).to.include("connected");
     await instance.poll("EMX12345");
+    await instance.stop();
+  });
+
+  it("stops after three failed attempts and reports final exhaustion", async () => {
+    const scanner = new FakeScanner();
+    scanner.discoveryFailures = 4;
+    const statuses: BluetoothStatusEvent[] = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { onStatus: (event) => statuses.push(event) },
+    );
+
+    await instance.start();
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(true);
+    await instance.reconnect();
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(true);
+    await instance.reconnect();
+
+    expect(scanner.discoveryCalls).to.equal(3);
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(false);
+    const finalFailure = statuses.at(-1);
+    expect(finalFailure?.status).to.equal("disconnected");
+    expect(finalFailure?.attempt).to.equal(3);
+    expect(finalFailure?.maxAttempts).to.equal(3);
+    expect(finalFailure?.retryExhausted).to.equal(true);
+    expect(finalFailure?.error?.message).to.equal("simulated scan failure");
+
+    await instance.reconnect();
+    expect(scanner.discoveryCalls).to.equal(3);
+    expect(statuses.at(-1)).to.equal(finalFailure);
+    await instance.stop();
+  });
+
+  it("resets the attempt limit after a successful connection", async () => {
+    const scanner = new FakeScanner();
+    scanner.connectFailure = new Error("initial connection failure");
+    const statuses: BluetoothStatusEvent[] = [];
+    const instance = new BluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { onStatus: (event) => statuses.push(event) },
+    );
+
+    await instance.start();
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(true);
+    scanner.connectFailure = undefined;
+    await instance.reconnect();
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(false);
+
+    scanner.link.triggerDisconnect();
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(true);
+    scanner.discoveryFailures = 3;
+    await instance.reconnect();
+    await instance.reconnect();
+
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(true);
+    expect(statuses.at(-1)?.attempt).to.equal(2);
+    expect(statuses.at(-1)?.retryExhausted).to.equal(false);
+    await instance.reconnect();
+    expect(instance.hasReconnectAttemptsRemaining()).to.equal(false);
+    expect(statuses.at(-1)?.attempt).to.equal(3);
+    expect(statuses.at(-1)?.retryExhausted).to.equal(true);
     await instance.stop();
   });
 

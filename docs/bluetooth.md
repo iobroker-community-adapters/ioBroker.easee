@@ -38,7 +38,7 @@ affect Bluetooth support.
    or support requests.
 4. Keep the ioBroker host within range while the adapter connects.
 
-To add or remove chargers later, use the Device Manager on the **Bluetooth**
+To add or remove chargers later, use the Device Manager on the **Connection**
 tab, then save the settings and restart the adapter. Existing Bluetooth
 configuration remains usable; you do not need to re-enter stored PINs.
 
@@ -57,13 +57,23 @@ disabled. If the adapter cannot connect, check the serial number and PIN, make
 sure another phone or adapter is not using the charger, and verify that the
 ioBroker host can use Bluetooth.
 
-On Linux, **Automatic** is the recommended connection setting. The adapter
-also offers **BlueZ D-Bus** and **Raw HCI** for troubleshooting in the
-**Advanced Bluetooth functions** tab. Raw HCI may require extra host permissions
-and can
-conflict with other Bluetooth apps or scanners; leave it on Automatic unless
-you need to troubleshoot a specific setup. Linux and Docker installations may
-need access to the host Bluetooth adapter.
+On Linux, **Automatic** is the recommended connection setting. It uses
+BlueZ D-Bus and falls back to **Raw HCI** if Noble cannot resolve `dbus-next`
+and its HCI backend is available. The adapter also offers **BlueZ D-Bus** and
+**Raw HCI** explicitly for troubleshooting in the **Advanced Bluetooth
+functions** tab. Raw HCI may require
+extra host permissions and can conflict with other Bluetooth apps or scanners;
+leave it on Automatic unless you need to troubleshoot a specific setup. Linux
+and Docker installations may need access to the host Bluetooth adapter. If an
+explicit BlueZ D-Bus selection reports that Noble cannot resolve `dbus-next`,
+reinstall the adapter with its runtime dependencies. Adapter-state, binding,
+scanning, and intermediate connection-failure details are logged at debug
+level. Each configured charger gets at most three scan/connect attempts (the
+initial attempt plus two retries). The adapter logs one info-level `connecting`
+state and, on success, `connected`; a successful connection resets the retry
+count. If all three attempts fail, one error is logged and automatic retries
+for that charger stop until the adapter is restarted. A disconnect after a
+successful connection starts a new three-attempt cycle.
 
 ## What is available in Bluetooth mode
 

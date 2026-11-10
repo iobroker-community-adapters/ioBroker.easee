@@ -1,8 +1,11 @@
 "use strict";
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { Adapter, I18n } from "@iobroker/adapter-core";
+import {
+  EaseeBluetoothDeviceManagement,
+  getAdminDirectory,
+  getStoredBluetoothConfigurationError,
+} from "./lib/bluetooth-device-management.ts";
 import axios from "axios";
 import * as signalR from "@microsoft/signalr";
 import * as objEnum from "./lib/enum.ts";
@@ -14,14 +17,13 @@ import {
 } from "./lib/observations.ts";
 import { BluetoothClient } from "./lib/bluetooth-client.ts";
 import { BLUETOOTH_SERVICE_UUID } from "./lib/bluetooth-protocol.ts";
-import { DeviceManagement } from "@iobroker/dm-utils";
-import type {
-  ActionContext,
-  DeviceInfo,
-  DeviceLoadContext,
-  InstanceDetails,
-  JsonFormSchema,
-} from "@iobroker/dm-utils";
+import {
+  bluetoothOnlyChargerStateSuffixes,
+  chargerStateDefinitions,
+  cloudOnlyChargerStateSuffixes,
+  supportsConnectionMode,
+} from "./lib/charger-state-definitions.ts";
+import { deriveBluetoothSearchReadiness } from "./lib/bluetooth-readiness.ts";
 import type {
   BluetoothAdapterState,
   BluetoothAdapterStatusProvider,
@@ -54,35 +56,7 @@ import type {
 type Timer = ioBroker.Timeout | undefined;
 type Phase = "p1" | "p2" | "p3";
 type AdapterOptions = ioBroker.AdapterOptions;
-
 const encryptedBluetoothPinPrefix = "easee:v1:";
-const cloudOnlyChargerStateSuffixes = new Set([
-  "control.start",
-  "control.stop",
-  "status.cableLocked",
-  "status.authToken",
-  "status.authTokenName",
-  "status.wiFiRSSI",
-  "status.chargerFirmware",
-  "status.outputCurrent",
-  "status.inVoltageT1T2",
-  "status.inVoltageT1T3",
-  "status.inVoltageT1T4",
-  "status.inVoltageT1T5",
-  "status.isOnline",
-  "status.wiFiAPEnabled",
-  "status.TempMax",
-  "config.costPerKWh",
-  "config.costPerKwhExcludeVat",
-  "config.vat",
-  "config.smartCharging",
-  "config.smartButtonEnabled",
-]);
-const bluetoothOnlyChargerStateSuffixes = new Set([
-  "info.bluetoothConnection",
-  "info.bluetoothError",
-  "info.bluetoothRSSI",
-]);
 const cloudOnlyInstanceStateIds = new Set([
   "lastUpdate",
   "info.sessionPollLastRequest",
@@ -218,6 +192,14 @@ interface ObservationVersion {
 //Eigene Variablen
 const apiUrl = "https://api.easee.com";
 const apiRequestTimeout = 30000;
+const cloudChargerCommands = {
+  startCharging: { endpoint: "start_charging", label: "Start charging" },
+  stopCharging: { endpoint: "stop_charging", label: "Stop charging" },
+  pauseCharging: { endpoint: "pause_charging", label: "Pause charging" },
+  resumeCharging: { endpoint: "resume_charging", label: "Resume charging" },
+  rebootCharging: { endpoint: "reboot", label: "Reboot charging" },
+} as const;
+type CloudChargerCommand = keyof typeof cloudChargerCommands;
 const sessionRequestInterval = 7 * 60 * 1000;
 const defaultSessionPollInterval = 60;
 const maxTimeoutMilliseconds = 2_147_483_647;
@@ -292,6 +274,10 @@ function getRateLimitDelay(error: unknown): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorType(error: unknown): string {
+  return error instanceof Error ? error.name : "unknown error";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -415,6 +401,16 @@ function getUniqueChargerCircuit(
   return matchingCircuits.length === 1 ? matchingCircuits[0] : undefined;
 }
 
+const validPhaseModes = [1, 2, 3] as const;
+type PhaseMode = (typeof validPhaseModes)[number];
+
+function isValidPhaseMode(value: unknown): value is PhaseMode {
+  return (
+    typeof value === "number" &&
+    validPhaseModes.some((phaseMode) => phaseMode === value)
+  );
+}
+
 function isValidCloudConfigValue(
   setting: string,
   value: ioBroker.StateValue,
@@ -425,7 +421,7 @@ function isValidCloudConfigValue(
     case "smartButtonEnabled":
       return typeof value === "boolean";
     case "phaseMode":
-      return typeof value === "number" && Number.isInteger(value);
+      return isValidPhaseMode(value);
     case "maxChargerCurrent":
     case "dynamicChargerCurrent":
       return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -452,47 +448,14 @@ function parseBluetoothChargersAllowEmpty(
   return value.length === 0 ? [] : parseBluetoothChargers(value);
 }
 
-function getStoredBluetoothConfigurationError(
-  error: unknown,
-): BluetoothConfigurationError {
-  if (
-    error instanceof BluetoothConfigurationError &&
-    error.source === "stored"
-  ) {
-    return error;
+function getLegacyBluetoothNativeReset(): Record<string, unknown> {
+  const native: Record<string, unknown> = { bluetoothChargers: "" };
+  for (let index = 1; index <= 10; index++) {
+    native[`bluetoothCharger${index}SerialNumber`] = "";
+    native[`bluetoothCharger${index}Pin`] = "";
+    native[`bluetoothCharger${index}Name`] = "";
   }
-  return new BluetoothConfigurationError(
-    "Stored Bluetooth charger configuration could not be read.",
-    "Die gespeicherte Bluetooth-Konfiguration konnte nicht gelesen werden.",
-    "stored",
-  );
-}
-
-function getBluetoothDeviceActionErrorMessage(
-  error: unknown,
-  action: "save" | "remove",
-): ioBroker.StringOrTranslated {
-  if (error instanceof BluetoothConfigurationError) {
-    if (error.source === "stored") {
-      return {
-        en: `The charger could not be ${action === "save" ? "saved" : "removed"} because the existing stored Bluetooth configuration is invalid: ${error.message}`,
-        de: `Die Wallbox konnte nicht ${action === "save" ? "gespeichert" : "entfernt"} werden, weil die vorhandene gespeicherte Bluetooth-Konfiguration ungültig ist: ${error.messageDe}`,
-      };
-    }
-    return {
-      en: `The submitted Bluetooth charger data is invalid: ${error.message}`,
-      de: `Die eingegebenen Bluetooth-Daten sind ungültig: ${error.messageDe}`,
-    };
-  }
-  return action === "save"
-    ? {
-        en: "The charger could not be saved. Check the serial number, PIN, and duplicate chargers.",
-        de: "Die Wallbox konnte nicht gespeichert werden. Prüfen Sie Seriennummer, PIN und mögliche Duplikate.",
-      }
-    : {
-        en: "The charger could not be removed from the configuration.",
-        de: "Die Wallbox konnte nicht aus der Konfiguration entfernt werden.",
-      };
+  return native;
 }
 
 function isRetryableError(error: unknown): error is RetryableError {
@@ -577,6 +540,7 @@ class Easee extends Adapter {
   bluetoothManualScanGeneration = 0;
   bluetoothConnections = new Map<string, boolean>();
   bluetoothConnectionErrors = new Map<string, string>();
+  bluetoothConnectingLogged = new Set<string>();
   bluetoothConnectionGenerations = new Map<string, number>();
   bluetoothPauseRestore = new Map<string, BluetoothPauseRestore>();
   bluetoothCircuitWrites = new Map<string, PendingBluetoothCircuitWrite>();
@@ -595,6 +559,7 @@ class Easee extends Adapter {
   bluetoothStartupComplete = false;
   bluetoothDeviceManagement!: EaseeBluetoothDeviceManagement;
   bluetoothConfigMutation: Promise<void> = Promise.resolve();
+  i18nInitialized = false;
 
   constructor(options: AdapterOptions = { name: "easee" }) {
     super({
@@ -630,6 +595,11 @@ class Easee extends Adapter {
           `Stored Bluetooth charger entry ${index + 1} field pin could not be decrypted.`,
           `Der PIN in Eintrag ${index + 1}, Feld pin, der gespeicherten Bluetooth-Konfiguration konnte nicht entschlüsselt werden.`,
           "stored",
+          {
+            type: "message",
+            key: "Stored Bluetooth charger entry %s field pin could not be decrypted.",
+            parameters: [index + 1],
+          },
         );
       }
       if (typeof pin !== "string" || !pin.trim()) {
@@ -637,6 +607,11 @@ class Easee extends Adapter {
           `Stored Bluetooth charger entry ${index + 1} field pin did not decrypt to a non-empty string.`,
           `Der PIN in Eintrag ${index + 1}, Feld pin, der gespeicherten Bluetooth-Konfiguration wurde nicht als nichtleere Zeichenkette entschlüsselt.`,
           "stored",
+          {
+            type: "message",
+            key: "Stored Bluetooth charger entry %s field pin did not decrypt to a non-empty string.",
+            parameters: [index + 1],
+          },
         );
       }
       return { ...charger, pin: pin.trim() };
@@ -691,19 +666,11 @@ class Easee extends Adapter {
   async resetBluetoothChargerConfiguration(): Promise<void> {
     const mutation = this.bluetoothConfigMutation.then(async () => {
       const native: Record<string, unknown> = {
-        bluetoothChargers: "[]",
+        ...getLegacyBluetoothNativeReset(),
         bluetoothChargerList: [],
         bluetoothChargerListManaged: true,
       };
-      for (let index = 1; index <= 10; index++) {
-        native[`bluetoothCharger${index}SerialNumber`] = "";
-        native[`bluetoothCharger${index}Pin`] = "";
-        native[`bluetoothCharger${index}Name`] = "";
-      }
-      await this.updateBluetoothNativeConfiguration(
-        native,
-        "Could not clear Bluetooth charger configuration",
-      );
+      await this.updateBluetoothNativeConfiguration(native);
       Object.assign(this.config, native);
       this.bluetoothChargers = [];
     });
@@ -713,20 +680,59 @@ class Easee extends Adapter {
 
   private async updateBluetoothNativeConfiguration(
     native: Record<string, unknown>,
-    errorMessage: string,
   ): Promise<void> {
-    const instanceObjectId = `system.adapter.${this.namespace}`;
-    const instanceObject = await this.getForeignObjectAsync(instanceObjectId);
-    if (!instanceObject || !isRecord(instanceObject.native)) {
-      throw new Error(errorMessage);
+    await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, {
+      native,
+    });
+  }
+
+  private encryptBluetoothChargerConfiguration(
+    chargers: BluetoothChargerConfig[],
+  ): BluetoothChargerConfig[] {
+    return chargers.map((charger) => {
+      const encryptedPin = this.encrypt(charger.pin);
+      if (typeof encryptedPin !== "string" || !encryptedPin.trim()) {
+        throw new Error("Could not encrypt Bluetooth charger PIN");
+      }
+      return {
+        ...charger,
+        pin: `${encryptedBluetoothPinPrefix}${encryptedPin}`,
+      };
+    });
+  }
+
+  async migrateBluetoothConfiguration(): Promise<void> {
+    const legacyNative = getLegacyBluetoothNativeReset();
+    const hasLegacySettings = Object.keys(legacyNative).some((key) => {
+      const value = (this.config as Record<string, unknown>)[key];
+      return typeof value === "string" && value.trim() !== "";
+    });
+    const configuredList = (this.config as Record<string, unknown>)
+      .bluetoothChargerList;
+    const isEncryptedCanonicalList =
+      this.config.bluetoothChargerListManaged === true &&
+      Array.isArray(configuredList) &&
+      configuredList.every(
+        (charger) =>
+          isRecord(charger) &&
+          typeof charger.pin === "string" &&
+          charger.pin.startsWith(encryptedBluetoothPinPrefix),
+      );
+    if (isEncryptedCanonicalList && !hasLegacySettings) {
+      return;
     }
-    await this.setForeignObjectAsync(
-      instanceObjectId as `system.adapter.${string}.${number}`,
-      {
-        ...instanceObject,
-        native: { ...instanceObject.native, ...native },
-      } as ioBroker.SettableObject<ioBroker.InstanceObject>,
-    );
+
+    const chargers = this.getConfiguredBluetoothChargers();
+    if (!hasLegacySettings && chargers.length === 0) {
+      return;
+    }
+    const native: Record<string, unknown> = {
+      ...getLegacyBluetoothNativeReset(),
+      bluetoothChargerList: this.encryptBluetoothChargerConfiguration(chargers),
+      bluetoothChargerListManaged: true,
+    };
+    await this.updateBluetoothNativeConfiguration(native);
+    Object.assign(this.config, native);
   }
 
   private mutateBluetoothChargers(
@@ -737,20 +743,14 @@ class Easee extends Adapter {
       const chargers = parseBluetoothChargersAllowEmpty(
         update(currentChargers),
       );
-      const encryptedChargers = chargers.map((charger) => ({
-        ...charger,
-        pin: `${encryptedBluetoothPinPrefix}${this.encrypt(charger.pin)}`,
-      }));
-      await this.updateBluetoothNativeConfiguration(
-        {
-          bluetoothChargerList: encryptedChargers,
-          bluetoothChargerListManaged: true,
-        },
-        "Could not save Bluetooth charger configuration",
-      );
-      this.config.bluetoothChargerList =
-        encryptedChargers as typeof this.config.bluetoothChargerList;
-      this.config.bluetoothChargerListManaged = true;
+      const native: Record<string, unknown> = {
+        ...getLegacyBluetoothNativeReset(),
+        bluetoothChargerList:
+          this.encryptBluetoothChargerConfiguration(chargers),
+        bluetoothChargerListManaged: true,
+      };
+      await this.updateBluetoothNativeConfiguration(native);
+      Object.assign(this.config, native);
     });
     this.bluetoothConfigMutation = mutation.catch(() => undefined);
     return mutation;
@@ -788,7 +788,7 @@ class Easee extends Adapter {
       }
       if (!this.unloading) {
         this.log.warn(
-          `SignalR connection closed: ${errorMessage(error || "unknown reason")}`,
+          `SignalR connection closed (${errorType(error || "unknown reason")}).`,
         );
         this.scheduleSignalRReconnect();
       }
@@ -805,7 +805,7 @@ class Easee extends Adapter {
         this.signalRConnection = null;
       }
       this.log.warn(
-        `SignalR start failed; REST polling remains active: ${errorMessage(error)}`,
+        `SignalR start failed (${errorType(error)}); REST polling remains active.`,
       );
       this.scheduleSignalRReconnect();
     }
@@ -814,8 +814,9 @@ class Easee extends Adapter {
   handleSignalRProductUpdate(data: SignalRProductUpdate): void {
     const stateName = objEnum.getNameByEnum(data.id);
     if (!stateName) {
-      this.log.debug(`New SignalR-ID, possible new Value: ${data.id}`);
-      this.log.debug(JSON.stringify(data));
+      this.log.debug(
+        `Unknown SignalR observation (id=${data.id}, dataType=${data.dataType}, valueType=${typeof data.value}).`,
+      );
       return;
     }
     if (typeof data.mid !== "string" || !data.mid) {
@@ -834,7 +835,7 @@ class Easee extends Adapter {
         const normalized = normalizeBooleanObservation(value);
         if (normalized === undefined) {
           this.log.debug(
-            `SignalR observation ${data.id} for ${data.mid} had invalid boolean value ${JSON.stringify(data.value)}`,
+            `SignalR observation ${data.id} had an invalid boolean value (type=${typeof data.value}).`,
           );
           return;
         }
@@ -845,7 +846,7 @@ class Easee extends Adapter {
         const number = Number(value);
         if (!Number.isFinite(number)) {
           this.log.debug(
-            `SignalR observation ${data.id} for ${data.mid} had invalid number ${JSON.stringify(data.value)}`,
+            `SignalR observation ${data.id} had an invalid number (type=${typeof data.value}).`,
           );
           return;
         }
@@ -856,7 +857,7 @@ class Easee extends Adapter {
         const number = Number(value);
         if (!Number.isFinite(number)) {
           this.log.debug(
-            `SignalR observation ${data.id} for ${data.mid} had invalid integer ${JSON.stringify(data.value)}`,
+            `SignalR observation ${data.id} had an invalid integer (type=${typeof data.value}).`,
           );
           return;
         }
@@ -868,7 +869,7 @@ class Easee extends Adapter {
     const stateId = `${data.mid}${stateName}`;
     const timestamp = Date.parse(data.timestamp ?? "");
     this.log.debug(
-      `SignalR observation ${data.id} for ${stateId}: raw=${JSON.stringify(data.value)}, converted=${JSON.stringify(value)}, timestamp=${data.timestamp ?? "missing"}`,
+      `SignalR observation ${data.id} updated (${typeof value}) at ${data.timestamp ?? "unknown time"}.`,
     );
     this.writeObservedState(
       stateId,
@@ -876,7 +877,7 @@ class Easee extends Adapter {
       Number.isFinite(timestamp) ? timestamp : undefined,
       "SignalR",
     ).catch((error) =>
-      this.log.warn(`SignalR state update failed: ${errorMessage(error)}`),
+      this.log.warn(`SignalR state update failed (${errorType(error)}).`),
     );
   }
 
@@ -916,7 +917,7 @@ class Easee extends Adapter {
       })
       .catch((error) => {
         this.log.warn(
-          `SignalR subscription failed for charger ${chargerId}: ${errorMessage(error)}`,
+          `SignalR subscription failed for charger ${chargerId} (${errorType(error)}).`,
         );
       })
       .finally(() => {
@@ -936,7 +937,7 @@ class Easee extends Adapter {
     this.signalRReconnectTimer = this.setTimeout(() => {
       this.signalRReconnectTimer = undefined;
       this.startSignal().catch((error) =>
-        this.log.warn(`SignalR reconnect failed: ${errorMessage(error)}`),
+        this.log.warn(`SignalR reconnect failed (${errorType(error)}).`),
       );
     }, 30000);
   }
@@ -987,9 +988,42 @@ class Easee extends Adapter {
   /**
    * Starten den Adapter
    */
+  private async ensureLastUpdateObject(): Promise<void> {
+    await this.setObjectNotExistsAsync("lastUpdate", {
+      type: "state",
+      common: {
+        name: "lastUpdate",
+        type: "string",
+        role: "text",
+        read: true,
+        write: false,
+      },
+      native: {},
+    });
+    await this.extendObjectAsync("lastUpdate", {
+      common: { type: "string", role: "text" },
+    });
+  }
+
+  private async initializeI18n(): Promise<void> {
+    if (this.i18nInitialized) {
+      return;
+    }
+    try {
+      await I18n.init(getAdminDirectory(), this);
+    } catch (error) {
+      this.log.warn(
+        `Could not determine the language for Bluetooth status text; using English: ${errorMessage(error)}`,
+      );
+      await I18n.init(getAdminDirectory(), "en");
+    }
+    this.i18nInitialized = true;
+  }
+
   async onReady(): Promise<void> {
     //initial Status melden
     await this.setStateAsync("info.connection", false, true);
+    await this.initializeI18n();
 
     this.connectionMode = getConnectionMode(this.config.connectionMode);
     await this.reconcileModeSpecificObjects();
@@ -1035,18 +1069,7 @@ class Easee extends Adapter {
         this.config.client_secret,
       );
       if (login) {
-        //Erstes Objekt erstellen
-        await this.setObjectNotExistsAsync("lastUpdate", {
-          type: "state",
-          common: {
-            name: "lastUpdate",
-            type: "string",
-            role: "indicator",
-            read: true,
-            write: false,
-          },
-          native: {},
-        });
+        await this.ensureLastUpdateObject();
 
         //reset all to start
         this.chargerIds = [];
@@ -1054,7 +1077,7 @@ class Easee extends Adapter {
         if (this.config.signalR) {
           this.log.info("Starting SignalR");
           this.startSignal().catch((error) =>
-            this.log.warn(`SignalR start failed: ${errorMessage(error)}`),
+            this.log.warn(`SignalR start failed (${errorType(error)}).`),
           );
         }
         // Start polling without delaying SignalR on a slow API response.
@@ -1064,16 +1087,13 @@ class Easee extends Adapter {
   }
 
   async startBluetooth(): Promise<void> {
-    const adminDirectory = existsSync(join(__dirname, "admin", "i18n"))
-      ? join(__dirname, "admin")
-      : join(__dirname, "..", "admin");
+    await this.initializeI18n();
     try {
-      await I18n.init(adminDirectory, this);
-    } catch (error) {
+      await this.migrateBluetoothConfiguration();
+    } catch {
       this.log.warn(
-        `Could not determine the language for Bluetooth status text; using English: ${errorMessage(error)}`,
+        "Bluetooth configuration migration failed; the original settings were left unchanged.",
       );
-      await I18n.init(adminDirectory, "en");
     }
     this.lastBluetoothAdapterState = null;
     this.bluetoothStartupComplete = false;
@@ -1225,7 +1245,7 @@ class Easee extends Adapter {
           );
         return;
       }
-      this.log.info(`Using Noble Bluetooth binding: ${scanner.getBinding()}.`);
+      this.log.debug(`Using Noble Bluetooth binding: ${scanner.getBinding()}.`);
       this.bluetoothScanner = scanner;
       this.bluetoothAdapterStateUnsubscribe = scanner.onAdapterStateChange(
         (state) => this.updateBluetoothAdapterState(state),
@@ -1299,7 +1319,7 @@ class Easee extends Adapter {
         if (this.lastBluetoothAdapterState !== state) {
           const previous = this.lastBluetoothAdapterState;
           this.lastBluetoothAdapterState = state;
-          this.log.info(
+          this.log.debug(
             previous
               ? `Local Bluetooth adapter state changed from ${previous} to ${state}.`
               : `Local Bluetooth adapter state: ${state}.`,
@@ -1337,104 +1357,22 @@ class Easee extends Adapter {
     }
   }
 
-  private getBluetoothSearchReadiness(): string {
-    if (this.unloading) {
-      return "The adapter is stopping.";
-    }
-    if (this.connectionMode !== "bluetooth") {
-      return "Bluetooth search is unavailable in Cloud mode.";
-    }
-    if (!this.bluetoothScanner) {
-      return this.bluetoothStartupComplete
-        ? "Bluetooth transport is unavailable; check the adapter log."
-        : "Initializing the local Bluetooth transport.";
-    }
-
-    const adapterState = this.lastBluetoothAdapterState ?? "unknown";
-    if (
-      adapterState === "poweredOff" ||
-      adapterState === "unauthorized" ||
-      adapterState === "unsupported"
-    ) {
-      return `Not ready: the local Bluetooth adapter reports ${adapterState}.`;
-    }
-    if (!this.bluetoothStartupComplete) {
-      return `Busy: the initial Bluetooth connection attempt is running (local adapter: ${adapterState}).`;
-    }
-    if (this.bluetoothManualScanInFlight) {
-      return "A manual Bluetooth search is running.";
-    }
-    if (this.bluetoothPollInFlight) {
-      return "Busy: Bluetooth polling is active.";
-    }
-    if (this.bluetoothWritesInFlight > 0) {
-      return `Busy: ${this.bluetoothWritesInFlight} Bluetooth write(s) are active.`;
-    }
-    if (
-      this.bluetoothCircuitWrites.size > 0 ||
-      this.bluetoothCircuitWritesInFlight > 0
-    ) {
-      return "Busy: a Bluetooth current update is pending or active.";
-    }
-    if (this.bluetoothReconnectInFlight) {
-      return "Busy: Bluetooth reconnection is active.";
-    }
-    if (adapterState === "poweredOn") {
-      return "Ready to search: the local adapter reports poweredOn; charger presence is not confirmed.";
-    }
-    return `Waiting for the local Bluetooth adapter to report poweredOn (current state: ${adapterState}).`;
-  }
-
-  private getBluetoothSearchReadinessDisplay(): string {
-    if (this.unloading) {
-      return I18n.t("The adapter is stopping.");
-    }
-    if (this.connectionMode !== "bluetooth") {
-      return I18n.t("Bluetooth search is available only in Bluetooth mode.");
-    }
-    if (!this.bluetoothScanner) {
-      return this.bluetoothStartupComplete
-        ? I18n.t(
-            "Bluetooth is not available. Check the adapter log for details.",
-          )
-        : I18n.t("Bluetooth is starting.");
-    }
-
-    const adapterState = this.lastBluetoothAdapterState ?? "unknown";
-    if (
-      adapterState === "poweredOff" ||
-      adapterState === "unauthorized" ||
-      adapterState === "unsupported"
-    ) {
-      return I18n.t(
-        "Bluetooth is not available. Check that it is turned on and accessible.",
-      );
-    }
-    if (!this.bluetoothStartupComplete) {
-      return I18n.t("Bluetooth is connecting to the saved charger.");
-    }
-    if (this.bluetoothManualScanInFlight) {
-      return I18n.t("A Bluetooth search is already running.");
-    }
-    if (this.bluetoothPollInFlight) {
-      return I18n.t("The adapter is checking the saved charger.");
-    }
-    if (this.bluetoothWritesInFlight > 0) {
-      return I18n.t("The adapter is sending a command to the charger.");
-    }
-    if (
-      this.bluetoothCircuitWrites.size > 0 ||
-      this.bluetoothCircuitWritesInFlight > 0
-    ) {
-      return I18n.t("The adapter is updating the charger settings.");
-    }
-    if (this.bluetoothReconnectInFlight) {
-      return I18n.t("The adapter is reconnecting to the charger.");
-    }
-    if (adapterState === "poweredOn") {
-      return I18n.t("Ready to search for nearby chargers.");
-    }
-    return I18n.t("Waiting for Bluetooth to become available.");
+  private getBluetoothSearchReadiness(): ReturnType<
+    typeof deriveBluetoothSearchReadiness
+  > {
+    return deriveBluetoothSearchReadiness({
+      unloading: this.unloading,
+      bluetoothMode: this.connectionMode === "bluetooth",
+      scannerAvailable: this.bluetoothScanner !== null,
+      startupComplete: this.bluetoothStartupComplete,
+      adapterState: this.lastBluetoothAdapterState,
+      scanInFlight: this.bluetoothManualScanInFlight,
+      pollInFlight: this.bluetoothPollInFlight,
+      activeWrites: this.bluetoothWritesInFlight,
+      pendingCircuitWrites: this.bluetoothCircuitWrites.size,
+      activeCircuitWrites: this.bluetoothCircuitWritesInFlight,
+      reconnectInFlight: this.bluetoothReconnectInFlight,
+    });
   }
 
   private async writeBluetoothScanResults(
@@ -1457,14 +1395,15 @@ class Easee extends Adapter {
       this.bluetoothSearchReadinessWrite ?? Promise.resolve()
     )
       .then(async () => {
+        const readiness = this.getBluetoothSearchReadiness();
         await this.setStateAsync(
           "info.bluetoothSearchReadiness",
-          this.getBluetoothSearchReadiness(),
+          readiness.rawMessage,
           true,
         );
         await this.setStateAsync(
           "info.bluetoothSearchReadinessDisplay",
-          this.getBluetoothSearchReadinessDisplay(),
+          I18n.t(readiness.displayMessageKey),
           true,
         );
       })
@@ -1510,6 +1449,7 @@ class Easee extends Adapter {
     if (this.connectionMode !== "bluetooth" || this.unloading) {
       return { error: "unavailable" };
     }
+    let readiness = this.getBluetoothSearchReadiness();
     const scanner = this.bluetoothScanner;
     if (!scanner) {
       this.log.warn(
@@ -1518,24 +1458,48 @@ class Easee extends Adapter {
       await this.updateBluetoothSearchReadiness();
       return { error: "notReady" };
     }
-    const busyReason = !this.bluetoothStartupComplete
-      ? "initial Bluetooth connection attempt is still running"
-      : this.bluetoothManualScanInFlight
-        ? "another manual Bluetooth search is already running"
-        : this.bluetoothPollInFlight
-          ? "Bluetooth polling is active"
-          : this.bluetoothWritesInFlight > 0
-            ? "a Bluetooth write is active"
-            : this.bluetoothCircuitWrites.size > 0 ||
-                this.bluetoothCircuitWritesInFlight > 0
-              ? "a Bluetooth current update is pending or active"
-              : this.bluetoothReconnectInFlight
-                ? "Bluetooth reconnection is active"
-                : undefined;
-    if (busyReason) {
-      const message = `Search not started: ${busyReason}. Try again when it completes.`;
+    if (!readiness.busyReason) {
+      let adapterState: BluetoothAdapterState | null;
+      try {
+        adapterState = this.refreshBluetoothAdapterState();
+      } catch (error) {
+        const detail = this.sanitizeBluetoothDiagnostic(errorMessage(error))
+          .replace(/[\r\n\t]+/g, " ")
+          .slice(0, 200);
+        await this.writeBluetoothScanResults(
+          `Could not read local Bluetooth adapter state: ${detail}`,
+          I18n.t(
+            "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
+          ),
+        );
+        await this.setStateAsync(
+          "info.bluetoothSearchReadiness",
+          `Not ready: could not read the local Bluetooth adapter state (${detail}).`,
+          true,
+        );
+        await this.setStateAsync(
+          "info.bluetoothSearchReadinessDisplay",
+          I18n.t(
+            "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
+          ),
+          true,
+        );
+        this.log.warn(`Manual Bluetooth search not started: ${detail}`);
+        return { error: "failed" };
+      }
+      if (this.unloading || this.connectionMode !== "bluetooth") {
+        return { error: "unavailable" };
+      }
+      if (adapterState) {
+        this.updateBluetoothAdapterState(adapterState);
+        await this.bluetoothAdapterStateWrite;
+        readiness = this.getBluetoothSearchReadiness();
+      }
+    }
+    if (readiness.busyReason) {
+      const message = `Search not started: ${readiness.busyReason}. Try again when it completes.`;
       this.log.info(
-        `Manual Bluetooth search not started: ${busyReason} (startupComplete=${this.bluetoothStartupComplete}, scanInFlight=${this.bluetoothManualScanInFlight}, pollInFlight=${this.bluetoothPollInFlight}, writesInFlight=${this.bluetoothWritesInFlight}, circuitWritesPending=${this.bluetoothCircuitWrites.size}, circuitWritesActive=${this.bluetoothCircuitWritesInFlight}, reconnectInFlight=${this.bluetoothReconnectInFlight}).`,
+        `Manual Bluetooth search not started: ${readiness.busyReason} (${readiness.diagnostics}).`,
       );
       await this.writeBluetoothScanResults(
         message,
@@ -1544,62 +1508,29 @@ class Easee extends Adapter {
       await this.updateBluetoothSearchReadiness();
       return { error: "busy" };
     }
+    if (!readiness.canScan) {
+      if (readiness.reason === "adapterUnavailable") {
+        const adapterState = this.lastBluetoothAdapterState ?? "unknown";
+        await this.writeBluetoothScanResults(
+          `Search not started: local Bluetooth adapter state is ${adapterState}.`,
+          I18n.t("The local Bluetooth adapter is not ready."),
+        );
+        this.log.warn(
+          `Manual Bluetooth search not started: local adapter state is ${adapterState}`,
+        );
+        await this.updateBluetoothSearchReadiness();
+        return { error: "notReady" };
+      }
+      await this.updateBluetoothSearchReadiness();
+      return { error: "notReady" };
+    }
 
     this.bluetoothManualScanInFlight = true;
     await this.updateBluetoothSearchReadiness();
     const generation = ++this.bluetoothManualScanGeneration;
-    let adapterState: BluetoothAdapterState | null;
-    try {
-      adapterState = this.refreshBluetoothAdapterState();
-    } catch (error) {
-      this.bluetoothManualScanInFlight = false;
-      const detail = errorMessage(error)
-        .replace(/[\\r\\n\\t]+/g, " ")
-        .slice(0, 200);
-      await this.writeBluetoothScanResults(
-        `Could not read local Bluetooth adapter state: ${detail}`,
-        I18n.t(
-          "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
-        ),
-      );
-      await this.setStateAsync(
-        "info.bluetoothSearchReadiness",
-        `Not ready: could not read the local Bluetooth adapter state (${detail}).`,
-        true,
-      );
-      await this.setStateAsync(
-        "info.bluetoothSearchReadinessDisplay",
-        I18n.t(
-          "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
-        ),
-        true,
-      );
-      this.log.warn(`Manual Bluetooth search not started: ${detail}`);
-      return { error: "failed" };
-    }
     if (this.unloading || generation !== this.bluetoothManualScanGeneration) {
       this.bluetoothManualScanInFlight = false;
       return { error: "unavailable" };
-    }
-    if (adapterState) {
-      this.updateBluetoothAdapterState(adapterState);
-      await this.bluetoothAdapterStateWrite;
-    }
-    if (
-      adapterState === "poweredOff" ||
-      adapterState === "unauthorized" ||
-      adapterState === "unsupported"
-    ) {
-      this.bluetoothManualScanInFlight = false;
-      await this.writeBluetoothScanResults(
-        `Search not started: local Bluetooth adapter state is ${adapterState ?? "unknown"}.`,
-        I18n.t("The local Bluetooth adapter is not ready."),
-      );
-      this.log.warn(
-        `Manual Bluetooth search not started: local adapter state is ${adapterState}`,
-      );
-      await this.updateBluetoothSearchReadiness();
-      return { error: "notReady" };
     }
 
     if (this.bluetoothPollTimer) {
@@ -1657,7 +1588,7 @@ class Easee extends Adapter {
         return { error: "unavailable" };
       }
       this.log.info(
-        `Starting manual Bluetooth search for the Easee service UUID ${BLUETOOTH_SERVICE_UUID} or manufacturer ID 3118 with an unfiltered advertisement scan; local adapter state is ${adapterState ?? "unknown"}.`,
+        `Starting manual Bluetooth search for the Easee service UUID ${BLUETOOTH_SERVICE_UUID} or manufacturer ID 3118 with an unfiltered advertisement scan; local adapter state is ${this.lastBluetoothAdapterState ?? "unknown"}.`,
       );
       scanStartedAt = Date.now();
       const scanTask = scanner.discover(
@@ -1900,22 +1831,28 @@ class Easee extends Adapter {
       ? this.sanitizeBluetoothDiagnostic(event.error.message)
       : undefined;
     const statusMessage = `Bluetooth connection state: ${event.status}`;
-    if (detail !== undefined) {
-      if (
-        detail.startsWith("No advertisements matching") ||
-        detail.startsWith(
-          "All matching BLE advertisements were already assigned",
-        )
-      ) {
-        this.log.info(`${statusMessage}: ${detail}`);
+    const connected = event.status === "connected";
+    if (connected) {
+      this.bluetoothConnectingLogged.delete(event.serial);
+      this.log.info(statusMessage);
+    } else if (event.retryExhausted) {
+      this.bluetoothConnectingLogged.delete(event.serial);
+      this.log.error(
+        `Bluetooth connection failed after ${event.maxAttempts ?? event.attempt ?? 3} attempts for ${event.name}: ${detail ?? "No connection could be established."}`,
+      );
+    } else if (detail !== undefined) {
+      this.log.debug(`${statusMessage}: ${detail}`);
+    } else if (event.status === "scanning" || event.status === "connecting") {
+      if (this.bluetoothConnectingLogged.has(event.serial)) {
+        this.log.debug(statusMessage);
       } else {
-        this.log.warn(`${statusMessage}: ${detail}`);
+        this.bluetoothConnectingLogged.add(event.serial);
+        this.log.info("Bluetooth connection state: connecting");
       }
     } else {
-      this.log.info(statusMessage);
+      this.log.debug(statusMessage);
     }
 
-    const connected = event.status === "connected";
     this.bluetoothConnections.set(event.serial, connected);
     if (detail !== undefined) {
       this.bluetoothConnectionErrors.set(event.serial, detail);
@@ -1981,6 +1918,7 @@ class Easee extends Adapter {
       this.bluetoothReconnectTimer ||
       this.bluetoothReconnectInFlight ||
       this.bluetoothManualScanInFlight ||
+      !this.bluetoothClient.hasReconnectAttemptsRemaining() ||
       [...this.bluetoothConnections.values()].every(Boolean)
     ) {
       return;
@@ -1993,7 +1931,10 @@ class Easee extends Adapter {
       if (!client || this.unloading) {
         return;
       }
-      if (this.bluetoothManualScanInFlight) {
+      if (
+        this.bluetoothManualScanInFlight ||
+        !client.hasReconnectAttemptsRemaining()
+      ) {
         return;
       }
       this.bluetoothReconnectInFlight = true;
@@ -2013,7 +1954,7 @@ class Easee extends Adapter {
             this.bluetoothConnections.size > 0
           ) {
             this.bluetoothReconnectDelay = 10000;
-          } else {
+          } else if (client.hasReconnectAttemptsRemaining()) {
             this.bluetoothReconnectDelay = Math.min(delay * 2, 300000);
             this.scheduleBluetoothReconnect();
           }
@@ -2186,7 +2127,7 @@ class Easee extends Adapter {
         return;
       }
       case "phaseMode":
-        if (value !== 1 && value !== 2 && value !== 3) {
+        if (!isValidPhaseMode(value)) {
           throw new Error("Phase mode must be 1, 2 or 3");
         }
         await this.executeVerifiedBluetoothCommand(
@@ -2763,7 +2704,7 @@ class Easee extends Adapter {
     const signalRShutdown = Promise.resolve(
       this.signalRConnection?.stop(),
     ).catch((error) =>
-      this.log.warn(`Error stopping SignalR: ${errorMessage(error)}`),
+      this.log.warn(`Error stopping SignalR (${errorType(error)}).`),
     );
     const pendingSessionShutdown = Promise.resolve(sessionShutdown).catch(
       (error) =>
@@ -3895,16 +3836,14 @@ class Easee extends Adapter {
       }
     }
     this.log.debug(
-      `${source} observation for ${stateId} accepted: ${JSON.stringify(value)} (timestamp=${version.timestamp ?? "missing"})`,
+      `${source} observation for ${stateId} accepted (timestamp=${version.timestamp ?? "missing"}).`,
     );
     const previousWrite = this.observedStateWrites.get(stateId);
     const write = (previousWrite ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {
         await this.setStateAsync(stateId, value, true);
-        this.log.debug(
-          `${source} observation value written to ${stateId}: ${JSON.stringify(value)}`,
-        );
+        this.log.debug(`${source} observation written to ${stateId}.`);
         if (chargingStartCharger) {
           await this.writeSessionAuthTokenIfCurrent(
             chargingStartCharger.chargerId,
@@ -3974,7 +3913,7 @@ class Easee extends Adapter {
     await writeConfigValue(
       "phaseMode",
       charger_config.phaseMode,
-      (value) => typeof value === "number" && Number.isInteger(value),
+      isValidPhaseMode,
     );
     await writeConfigValue(
       "ledStripBrightness",
@@ -4574,104 +4513,46 @@ class Easee extends Adapter {
     this.log.info("Charging price update successful");
   }
 
-  async startCharging(id: string): Promise<void> {
-    return await axios
-      .post(
-        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/start_charging`,
+  private async runCloudChargerCommand(
+    id: string,
+    command: CloudChargerCommand,
+  ): Promise<void> {
+    const details = cloudChargerCommands[command];
+    try {
+      await axios.post(
+        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/${details.endpoint}`,
         {},
         {
           headers: { Authorization: `Bearer ${this.accessToken}` },
           timeout: apiRequestTimeout,
         },
-      )
-      .then(() => {
-        this.log.info("Start charging successful");
-      })
-      .catch((error) => {
-        this.log.error("Start charging error");
-        this.log.error(errorMessage(error));
-        throw error;
-      });
+      );
+      this.log.info(`${details.label} successful`);
+    } catch (error) {
+      this.log.error(`${details.label} error`);
+      this.log.error(errorMessage(error));
+      throw error;
+    }
+  }
+
+  async startCharging(id: string): Promise<void> {
+    return this.runCloudChargerCommand(id, "startCharging");
   }
 
   async stopCharging(id: string): Promise<void> {
-    return await axios
-      .post(
-        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/stop_charging`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${this.accessToken}` },
-          timeout: apiRequestTimeout,
-        },
-      )
-      .then(() => {
-        this.log.info("Stop charging successful");
-      })
-      .catch((error) => {
-        this.log.error("Stop charging error");
-        this.log.error(errorMessage(error));
-        throw error;
-      });
+    return this.runCloudChargerCommand(id, "stopCharging");
   }
 
   async pauseCharging(id: string): Promise<void> {
-    return await axios
-      .post(
-        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/pause_charging`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${this.accessToken}` },
-          timeout: apiRequestTimeout,
-        },
-      )
-      .then(() => {
-        this.log.info("Pause charging successful");
-      })
-      .catch((error) => {
-        this.log.error("Pause charging error");
-        this.log.error(errorMessage(error));
-        throw error;
-      });
+    return this.runCloudChargerCommand(id, "pauseCharging");
   }
 
   async resumeCharging(id: string): Promise<void> {
-    return await axios
-      .post(
-        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/resume_charging`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${this.accessToken}` },
-          timeout: apiRequestTimeout,
-        },
-      )
-      .then(() => {
-        this.log.info("Resume charging successful");
-      })
-      .catch((error) => {
-        this.log.error("Resume charging error");
-        this.log.error(errorMessage(error));
-        throw error;
-      });
+    return this.runCloudChargerCommand(id, "resumeCharging");
   }
 
   async rebootCharging(id: string): Promise<void> {
-    return await axios
-      .post(
-        `${apiUrl}/api/chargers/${encodeURIComponent(id)}/commands/reboot`,
-        {},
-        {
-          headers: { Authorization: `Bearer ${this.accessToken}` },
-          timeout: apiRequestTimeout,
-        },
-      )
-      .then(() => {
-        this.log.info("Reboot charging successful");
-      })
-      .catch((error) => {
-        this.log.error("Reboot charging error");
-        this.log.error(errorMessage(error));
-        throw error;
-      });
+    return this.runCloudChargerCommand(id, "rebootCharging");
   }
 
   async changeConfig(
@@ -4848,75 +4729,53 @@ class Easee extends Adapter {
     }
   }
 
+  private async ensureRegisteredChargerStates(
+    charger: Charger,
+    category: "control" | "status" | "config",
+  ): Promise<void> {
+    for (const definition of chargerStateDefinitions) {
+      if (
+        definition.category !== category ||
+        !supportsConnectionMode(definition.modes, this.connectionMode)
+      ) {
+        continue;
+      }
+      const stateId = `${charger.id}.${definition.suffix}`;
+      const write = definition.writeModes
+        ? supportsConnectionMode(definition.writeModes, this.connectionMode)
+        : definition.write;
+      const common = {
+        name: definition.name,
+        type: definition.type,
+        role: definition.role,
+        read: definition.read,
+        write,
+        ...(definition.unit !== undefined ? { unit: definition.unit } : {}),
+        ...(definition.min !== undefined ? { min: definition.min } : {}),
+        ...(definition.max !== undefined ? { max: definition.max } : {}),
+      };
+      await this.setObjectNotExistsAsync(stateId, {
+        type: "state",
+        common,
+        native: {},
+      });
+      if (definition.updateExisting) {
+        await this.extendObjectAsync(stateId, {
+          common: {
+            ...definition.updateExisting,
+            ...(definition.writeModes ? { write } : {}),
+          },
+        });
+      }
+      if (definition.subscribe) {
+        this.subscribeStates(stateId);
+      }
+    }
+  }
+
   async setAllStatusObjects(charger: Charger): Promise<void> {
     await this.ensureChargerObjectStructure(charger);
-    //Legen die Steuerungsbutton für jeden Charger an
-    if (this.connectionMode !== "bluetooth") {
-      await this.setObjectNotExistsAsync(`${charger.id}.control.start`, {
-        type: "state",
-        common: {
-          name: "Start charging",
-          type: "boolean",
-          role: "button.start",
-          read: false,
-          write: true,
-        },
-        native: {},
-      });
-      this.subscribeStates(`${charger.id}.control.start`);
-
-      await this.setObjectNotExistsAsync(`${charger.id}.control.stop`, {
-        type: "state",
-        common: {
-          name: "Stop charging",
-          type: "boolean",
-          role: "button.stop",
-          read: false,
-          write: true,
-        },
-        native: {},
-      });
-      this.subscribeStates(`${charger.id}.control.stop`);
-    }
-
-    await this.setObjectNotExistsAsync(`${charger.id}.control.pause`, {
-      type: "state",
-      common: {
-        name: "Pause charging",
-        type: "boolean",
-        role: "button",
-        read: false,
-        write: true,
-      },
-      native: {},
-    });
-    this.subscribeStates(`${charger.id}.control.pause`);
-
-    await this.setObjectNotExistsAsync(`${charger.id}.control.resume`, {
-      type: "state",
-      common: {
-        name: "Resume charging",
-        type: "boolean",
-        role: "button.resume",
-        read: false,
-        write: true,
-      },
-      native: {},
-    });
-    this.subscribeStates(`${charger.id}.control.resume`);
-
-    await this.setObjectNotExistsAsync(`${charger.id}.control.reboot`, {
-      type: "state",
-      common: {
-        name: "Reboot Charger",
-        type: "boolean",
-        role: "button",
-        read: false,
-        write: true,
-      },
-      native: {},
-    });
-    this.subscribeStates(`${charger.id}.control.reboot`);
+    await this.ensureRegisteredChargerStates(charger, "control");
 
     //id
     await this.setObjectNotExistsAsync(`${charger.id}.id`, {
@@ -4949,456 +4808,15 @@ class Easee extends Adapter {
     });
     this.subscribeStates(`${charger.id}.name`);
 
+    await this.ensureRegisteredChargerStates(charger, "status");
     if (this.connectionMode !== "bluetooth") {
-      //"cableLocked": true,
-      const cableLockedId = `${charger.id}.status.cableLocked`;
-      await this.setObjectNotExistsAsync(cableLockedId, {
-        type: "state",
-        common: {
-          name: "Cable lock state",
-          type: "boolean",
-          role: "indicator",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-      await this.extendObjectAsync(cableLockedId, {
-        common: { role: "indicator", read: true, write: false },
-      });
-    }
-
-    //"chargerOpMode": 1,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.chargerOpMode`, {
-      type: "state",
-      common: {
-        name: "Charger operation mode according to charger mode table",
-        type: "number",
-        role: "value",
-        read: true,
-        write: false,
-      },
-      native: {},
-    });
-
-    if (this.connectionMode !== "bluetooth") {
-      const authTokenId = `${charger.id}.status.authToken`;
-      const authTokenName =
-        "Authorization token used for the last completed charging session";
-      await this.setObjectNotExistsAsync(authTokenId, {
-        type: "state",
-        common: {
-          name: authTokenName,
-          type: "string",
-          role: "text",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-      await this.extendObjectAsync(authTokenId, {
-        common: { name: authTokenName },
-      });
-      const authTokenState = await this.getStateAsync(authTokenId);
-      if (
-        !authTokenState ||
-        authTokenState.val === null ||
-        authTokenState.val === undefined
-      ) {
-        await this.setStateAsync(authTokenId, "", true);
+      for (const suffix of ["status.authToken", "status.authTokenName"]) {
+        const stateId = `${charger.id}.${suffix}`;
+        const state = await this.getStateAsync(stateId);
+        if (!state || state.val === null || state.val === undefined) {
+          await this.setStateAsync(stateId, "", true);
+        }
       }
-      const authTokenNameId = `${charger.id}.status.authTokenName`;
-      await this.setObjectNotExistsAsync(authTokenNameId, {
-        type: "state",
-        common: {
-          name: "Owner name of the charging session authorization token",
-          type: "string",
-          role: "text",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-      const authTokenNameState = await this.getStateAsync(authTokenNameId);
-      if (
-        !authTokenNameState ||
-        authTokenNameState.val === null ||
-        authTokenNameState.val === undefined
-      ) {
-        await this.setStateAsync(authTokenNameId, "", true);
-      }
-    }
-
-    //"totalPower": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.totalPower`, {
-      type: "state",
-      common: {
-        name: "Total power [kW]",
-        type: "number",
-        role: "value.power",
-        read: true,
-        write: false,
-        unit: "kW",
-      },
-      native: {},
-    });
-
-    if (this.connectionMode !== "bluetooth") {
-      //"wiFiRSSI": 0,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.wiFiRSSI`, {
-        type: "state",
-        common: {
-          name: "WiFi signal strength [dBm]",
-          type: "number",
-          role: "value",
-          read: true,
-          write: false,
-          unit: "dBm",
-        },
-        native: {},
-      });
-
-      //"chargerFirmware": 0,
-      const firmwareId = `${charger.id}.status.chargerFirmware`;
-      await this.setObjectNotExistsAsync(firmwareId, {
-        type: "state",
-        common: {
-          name: "Modem firmware version",
-          type: "number",
-          role: "value",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-      await this.extendObjectAsync(firmwareId, {
-        common: { role: "value", read: true, write: false },
-      });
-    }
-
-    //"reasonForNoCurrent": 0,
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.status.reasonForNoCurrent`,
-      {
-        type: "state",
-        common: {
-          name: "Reason for not offering current to the car",
-          type: "number",
-          role: "value",
-          read: true,
-          write: false,
-        },
-        native: {},
-      },
-    );
-
-    //"voltage": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.voltage`, {
-      type: "state",
-      common: {
-        name: "voltage",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-
-    if (this.connectionMode !== "bluetooth") {
-      //"outputCurrent": 0,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.outputCurrent`, {
-        type: "state",
-        common: {
-          name: "Active output phase(s) to EV according to output phase type table.",
-          type: "number",
-          role: "value.current",
-          read: true,
-          write: false,
-          unit: "A",
-        },
-        native: {},
-      });
-    }
-
-    //"inCurrentT2": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inCurrentT2`, {
-      type: "state",
-      common: {
-        name: "Current RMS for input T2 [Amperes]",
-        type: "number",
-        role: "value.current",
-        read: true,
-        write: false,
-        unit: "A",
-      },
-      native: {},
-    });
-
-    //"inCurrentT3": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inCurrentT3`, {
-      type: "state",
-      common: {
-        name: "Current RMS for input T3 [Amperes]",
-        type: "number",
-        role: "value.current",
-        read: true,
-        write: false,
-        unit: "A",
-      },
-      native: {},
-    });
-
-    //"inCurrentT4": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inCurrentT4`, {
-      type: "state",
-      common: {
-        name: "Current RMS for input T4 [Amperes]",
-        type: "number",
-        role: "value.current",
-        read: true,
-        write: false,
-        unit: "A",
-      },
-      native: {},
-    });
-
-    //"inCurrentT5": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inCurrentT5`, {
-      type: "state",
-      common: {
-        name: "Current RMS for input T5 [Amperes]",
-        type: "number",
-        role: "value.current",
-        read: true,
-        write: false,
-        unit: "A",
-      },
-      native: {},
-    });
-
-    if (this.connectionMode !== "bluetooth") {
-      //"inVoltageT1T2": 0,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT1T2`, {
-        type: "state",
-        common: {
-          name: "Current Voltage for between inputs T1 and T2 [Volts]",
-          type: "number",
-          role: "value.voltage",
-          read: true,
-          write: false,
-          unit: "V",
-        },
-        native: {},
-      });
-      //"inVoltageT1T3": 0,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT1T3`, {
-        type: "state",
-        common: {
-          name: "Current Voltage for between inputs T1 and T3 [Volts]",
-          type: "number",
-          role: "value.voltage",
-          read: true,
-          write: false,
-          unit: "V",
-        },
-        native: {},
-      });
-      //"inVoltageT1T4": 0,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT1T4`, {
-        type: "state",
-        common: {
-          name: "Current Voltage for between inputs T1 and T4 [Volts]",
-          type: "number",
-          role: "value.voltage",
-          read: true,
-          write: false,
-          unit: "V",
-        },
-        native: {},
-      });
-      //"inVoltageT1T5": 0,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT1T5`, {
-        type: "state",
-        common: {
-          name: "Current Voltage for between inputs T1 and T5 [Volts]",
-          type: "number",
-          role: "value.voltage",
-          read: true,
-          write: false,
-          unit: "V",
-        },
-        native: {},
-      });
-    }
-    //"inVoltageT2T3": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT2T3`, {
-      type: "state",
-      common: {
-        name: "Current Voltage for between inputs T2 and T3 [Volts]",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-    //"inVoltageT2T4": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT2T4`, {
-      type: "state",
-      common: {
-        name: "Current Voltage for between inputs T2 and T4 [Volts]",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-    //"inVoltageT2T5": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT2T5`, {
-      type: "state",
-      common: {
-        name: "Current Voltage for between inputs T2 and T5 [Volts]",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-    //"inVoltageT3T4": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT3T4`, {
-      type: "state",
-      common: {
-        name: "Current Voltage for between inputs T3 and T4 [Volts]",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-    //"inVoltageT3T5": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT3T5`, {
-      type: "state",
-      common: {
-        name: "Current Voltage for between inputs T3 and T5 [Volts]",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-    //"inVoltageT4T5": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.inVoltageT4T5`, {
-      type: "state",
-      common: {
-        name: "Current Voltage for between inputs T4 and T5 [Volts]",
-        type: "number",
-        role: "value.voltage",
-        read: true,
-        write: false,
-        unit: "V",
-      },
-      native: {},
-    });
-
-    if (this.connectionMode !== "bluetooth") {
-      //"isOnline": true,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.isOnline`, {
-        type: "state",
-        common: {
-          name: "isOnline",
-          type: "boolean",
-          role: "indicator.reachable",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-
-      //"wiFiAPEnabled": true,
-      await this.setObjectNotExistsAsync(`${charger.id}.status.wiFiAPEnabled`, {
-        type: "state",
-        common: {
-          name: "True if WiFi Access Point is enabled, otherwise false",
-          type: "boolean",
-          role: "indicator",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-    }
-
-    //"ledMode": true,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.ledMode`, {
-      type: "state",
-      common: {
-        name: "Charger LED mode",
-        type: "number",
-        role: "value",
-        read: true,
-        write: false,
-      },
-      native: {},
-    });
-
-    //"lifetimeEnergy": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.lifetimeEnergy`, {
-      type: "state",
-      common: {
-        name: "Accumulated energy in the lifetime of the charger [kWh]",
-        type: "number",
-        role: "value.energy.consumed",
-        read: true,
-        write: false,
-        unit: "kWh",
-      },
-      native: {},
-    });
-
-    //"energyPerHour": 0,
-    await this.setObjectNotExistsAsync(`${charger.id}.status.energyPerHour`, {
-      type: "state",
-      common: {
-        name: "Accumulated energy per hour [kWh]",
-        type: "number",
-        role: "value.energy.consumed",
-        read: true,
-        write: false,
-        unit: "kWh",
-      },
-      native: {},
-    });
-
-    if (this.connectionMode !== "bluetooth") {
-      // Ab hier nur Objekte die über SignalR kommen
-      //TempMax
-      const tempMaxId = `${charger.id}.status.TempMax`;
-      await this.setObjectNotExistsAsync(tempMaxId, {
-        type: "state",
-        common: {
-          name: "SignalR only: Maximum temperature for all sensors [Celsius]",
-          type: "number",
-          role: "value.temperature.max",
-          read: true,
-          write: false,
-          unit: "°C",
-        },
-        native: {},
-      });
-      await this.extendObjectAsync(tempMaxId, {
-        common: { role: "value.temperature.max", unit: "°C" },
-      });
     }
   }
 
@@ -5528,638 +4946,7 @@ class Easee extends Adapter {
 
   /*************** Config Reading ****************/
   async setAllConfigObjects(charger: Charger): Promise<void> {
-    if (this.connectionMode !== "bluetooth") {
-      await this.setObjectNotExistsAsync(`${charger.id}.config.costPerKWh`, {
-        type: "state",
-        common: {
-          name: "Charging price including VAT per kWh",
-          type: "number",
-          role: "value",
-          read: true,
-          write: false,
-        },
-        native: {},
-      });
-
-      await this.setObjectNotExistsAsync(
-        `${charger.id}.config.costPerKwhExcludeVat`,
-        {
-          type: "state",
-          common: {
-            name: "Charging price excluding VAT per kWh",
-            type: "number",
-            role: "state",
-            read: true,
-            write: true,
-          },
-          native: {},
-        },
-      );
-      this.subscribeStates(`${charger.id}.config.costPerKwhExcludeVat`);
-
-      await this.setObjectNotExistsAsync(`${charger.id}.config.vat`, {
-        type: "state",
-        common: {
-          name: "Value added tax for charging price",
-          type: "number",
-          role: "state",
-          read: true,
-          write: true,
-          unit: "%",
-        },
-        native: {},
-      });
-      this.subscribeStates(`${charger.id}.config.vat`);
-    }
-
-    //isEnabled
-    await this.setObjectNotExistsAsync(`${charger.id}.config.isEnabled`, {
-      type: "state",
-      common: {
-        name: "Set true to enable charger, false disables charger",
-        type: "boolean",
-        role: "switch.enable",
-        read: true,
-        write: true,
-      },
-      native: {},
-    });
-    this.subscribeStates(`${charger.id}.config.isEnabled`);
-
-    //phaseMode
-    await this.setObjectNotExistsAsync(`${charger.id}.config.phaseMode`, {
-      type: "state",
-      common: {
-        name: "Phase mode on this charger. 1-Locked to 1-Phase, 2-Auto, 3-Locked to 3-phase(only Home)",
-        type: "number",
-        role: "level",
-        read: true,
-        write: true,
-      },
-      native: {},
-    });
-    this.subscribeStates(`${charger.id}.config.phaseMode`);
-
-    //maxChargerCurrent
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.maxChargerCurrent`,
-      {
-        type: "state",
-        common: {
-          name: "Max current this charger is allowed to offer to car (A)",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.maxChargerCurrent`);
-
-    //dynamicChargerCurrent
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.dynamicChargerCurrent`,
-      {
-        type: "state",
-        common: {
-          name: "Dynamic max current this charger is allowed to offer to car (A)",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.dynamicChargerCurrent`);
-
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.dynamicCircuitCurrentP1`,
-      {
-        type: "state",
-        common: {
-          name: "Dynamically set circuit maximum current for phase 1 [Amperes]",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.dynamicCircuitCurrentP1`);
-
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.dynamicCircuitCurrentP2`,
-      {
-        type: "state",
-        common: {
-          name: "Dynamically set circuit maximum current for phase 2 [Amperes]",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.dynamicCircuitCurrentP2`);
-
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.dynamicCircuitCurrentP3`,
-      {
-        type: "state",
-        common: {
-          name: "Dynamically set circuit maximum current for phase 3 [Amperes]",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.dynamicCircuitCurrentP3`);
-
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.circuitMaxCurrentP1`,
-      {
-        type: "state",
-        common: {
-          name: "Set circuit maximum current [Amperes]",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.circuitMaxCurrentP1`);
-
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.circuitMaxCurrentP2`,
-      {
-        type: "state",
-        common: {
-          name: "Set circuit maximum current [Amperes]",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.circuitMaxCurrentP2`);
-
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.circuitMaxCurrentP3`,
-      {
-        type: "state",
-        common: {
-          name: "Set circuit maximum current [Amperes]",
-          type: "number",
-          role: "level.current",
-          read: true,
-          write: true,
-          unit: "A",
-        },
-        native: {},
-      },
-    );
-    this.subscribeStates(`${charger.id}.config.circuitMaxCurrentP3`);
-
-    //ledStripBrightness
-    await this.setObjectNotExistsAsync(
-      `${charger.id}.config.ledStripBrightness`,
-      {
-        type: "state",
-        common: {
-          name: "LED strip brightness, 0-100%",
-          type: "number",
-          role: "level.dimmer",
-          read: true,
-          write: true,
-          unit: "%",
-          min: 0,
-          max: 100,
-        },
-        native: {},
-      },
-    );
-    await this.extendObjectAsync(`${charger.id}.config.ledStripBrightness`, {
-      common: {
-        role: "level.dimmer",
-        unit: "%",
-        min: 0,
-        max: 100,
-      },
-    });
-    this.subscribeStates(`${charger.id}.config.ledStripBrightness`);
-
-    const lockCablePermanentlyId = `${charger.id}.config.lockCablePermanently`;
-    await this.setObjectNotExistsAsync(lockCablePermanentlyId, {
-      type: "state",
-      common: {
-        name: "Lock cable permanently setting",
-        type: "boolean",
-        role: "switch",
-        read: true,
-        write: true,
-      },
-      native: {},
-    });
-    await this.extendObjectAsync(lockCablePermanentlyId, {
-      common: { read: true, write: true },
-    });
-    this.subscribeStates(lockCablePermanentlyId);
-
-    if (this.connectionMode !== "bluetooth") {
-      //"smartCharging": true,
-      await this.setObjectNotExistsAsync(`${charger.id}.config.smartCharging`, {
-        type: "state",
-        common: {
-          name: "Smart charging state enabled by capacitive touch button",
-          type: "boolean",
-          role: "switch.enable",
-          read: true,
-          write: true,
-        },
-        native: {},
-      });
-      this.subscribeStates(`${charger.id}.config.smartCharging`);
-
-      //smartButtonEnabled
-      await this.setObjectNotExistsAsync(
-        `${charger.id}.config.smartButtonEnabled`,
-        {
-          type: "state",
-          common: {
-            name: "Smart Button Enabled/Disabled",
-            type: "boolean",
-            role: "switch.enable",
-            read: true,
-            write: true,
-          },
-          native: {},
-        },
-      );
-      this.subscribeStates(`${charger.id}.config.smartButtonEnabled`);
-    }
-
-    //wiFiSSID
-    await this.setObjectNotExistsAsync(`${charger.id}.config.wiFiSSID`, {
-      type: "state",
-      common: {
-        name: "WiFi SSID name",
-        type: "string",
-        role: "text",
-        read: true,
-        write: true,
-      },
-      native: {},
-    });
-    await this.extendObjectAsync(`${charger.id}.config.wiFiSSID`, {
-      common: { read: true, write: this.connectionMode !== "bluetooth" },
-    });
-    this.subscribeStates(`${charger.id}.config.wiFiSSID`);
-  }
-}
-
-const bluetoothChargerFormSchema = {
-  type: "panel",
-  items: {
-    serialNumber: {
-      type: "text",
-      label: {
-        en: "Serial number",
-        de: "Seriennummer",
-        ru: "Серийный номер",
-        pt: "Número de série",
-        nl: "Serienummer",
-        fr: "Numéro de série",
-        it: "Numero di serie",
-        es: "Número de serie",
-        pl: "Numer seryjny",
-        uk: "Серійний номер",
-        "zh-cn": "序列号",
-      },
-      validator:
-        "!!data.serialNumber && /^[A-Za-z0-9_-]+$/.test(data.serialNumber)",
-    },
-    pin: {
-      type: "password",
-      label: {
-        en: "Bluetooth PIN",
-        de: "Bluetooth-PIN",
-        ru: "PIN Bluetooth",
-        pt: "PIN do Bluetooth",
-        nl: "Bluetooth-pincode",
-        fr: "Code PIN Bluetooth",
-        it: "PIN Bluetooth",
-        es: "PIN de Bluetooth",
-        pl: "PIN Bluetooth",
-        uk: "PIN Bluetooth",
-        "zh-cn": "蓝牙 PIN",
-      },
-      help: {
-        en: "Leave empty to keep the current PIN when editing.",
-        de: "Leer lassen, um die aktuelle PIN beim Bearbeiten beizubehalten.",
-        ru: "Оставьте поле пустым, чтобы сохранить текущий PIN при редактировании.",
-        pt: "Deixe vazio para manter o PIN atual ao editar.",
-        nl: "Laat leeg om de huidige pincode te behouden bij bewerken.",
-        fr: "Laissez vide pour conserver le code PIN actuel lors de la modification.",
-        it: "Lascia vuoto per mantenere il PIN attuale durante la modifica.",
-        es: "Déjelo vacío para conservar el PIN actual al editar.",
-        pl: "Pozostaw puste, aby zachować obecny PIN podczas edycji.",
-        uk: "Залиште порожнім, щоб зберегти поточний PIN під час редагування.",
-        "zh-cn": "编辑时留空可保留当前 PIN。",
-      },
-    },
-    name: {
-      type: "text",
-      label: {
-        en: "Charger name (optional)",
-        de: "Wallbox-Name (optional)",
-        ru: "Имя зарядного устройства (необязательно)",
-        pt: "Nome do carregador (opcional)",
-        nl: "Naam van de lader (optioneel)",
-        fr: "Nom du chargeur (facultatif)",
-        it: "Nome del caricatore (opzionale)",
-        es: "Nombre del cargador (opcional)",
-        pl: "Nazwa ładowarki (opcjonalnie)",
-        uk: "Назва зарядного пристрою (необов’язково)",
-        "zh-cn": "充电器名称（可选）",
-      },
-    },
-  },
-} as JsonFormSchema;
-
-class EaseeBluetoothDeviceManagement extends DeviceManagement<Easee, string> {
-  protected get log(): ioBroker.Logger {
-    const logger = this.adapter.log;
-    return {
-      level: logger.level,
-      silly: (message) => logger.silly(message),
-      debug: (message) => {
-        if (!message.startsWith("DeviceManagement received:")) {
-          logger.debug(message);
-        }
-      },
-      info: (message) => logger.info(message),
-      warn: (message) => logger.warn(message),
-      error: (message) => logger.error(message),
-    };
-  }
-
-  protected getInstanceInfo(): InstanceDetails {
-    return {
-      apiVersion: "v3" as const,
-      actions: [
-        {
-          id: "addBluetoothCharger",
-          icon: "newDevice",
-          title: {
-            en: "Add Bluetooth charger",
-            de: "Bluetooth-Wallbox hinzufügen",
-          },
-          handler: async (context: ActionContext) => {
-            const form = await context.showForm(bluetoothChargerFormSchema, {
-              title: {
-                en: "Add Bluetooth charger",
-                de: "Bluetooth-Wallbox hinzufügen",
-              },
-              buttons: ["apply", "cancel"],
-            });
-            if (!form) {
-              return { refresh: false };
-            }
-            try {
-              await this.adapter.addBluetoothCharger(form);
-            } catch (error) {
-              await context.showMessage(
-                getBluetoothDeviceActionErrorMessage(error, "save"),
-              );
-              return { refresh: false };
-            }
-            await context.showMessage({
-              en: "Charger saved. Restart the adapter to apply the change.",
-              de: "Wallbox gespeichert. Starten Sie den Adapter neu, damit die Änderung wirksam wird.",
-            });
-            return { refresh: true };
-          },
-        },
-      ],
-    };
-  }
-
-  protected loadDevices(context: DeviceLoadContext<string>): void {
-    let chargers: BluetoothChargerConfig[];
-    try {
-      chargers = this.adapter.getConfiguredBluetoothChargers();
-    } catch (error) {
-      const configurationError = getStoredBluetoothConfigurationError(error);
-      context.setTotalDevices(1);
-      context.addDevice({
-        id: "__bluetooth-configuration-error__",
-        identifier: "Stored Bluetooth configuration",
-        name: {
-          en: `Bluetooth configuration error: ${configurationError.message}`,
-          de: `Fehler in der Bluetooth-Konfiguration: ${configurationError.messageDe}`,
-        },
-        connectionType: "bluetooth",
-        status: { connection: "disconnected", warning: true },
-        actions: [
-          {
-            id: "resetBluetoothChargerConfiguration",
-            icon: "delete",
-            title: {
-              en: "Clear configuration",
-              de: "Konfiguration löschen",
-            },
-            confirmation: {
-              en: "This clears all saved Bluetooth chargers, PINs, and legacy Bluetooth settings. Continue?",
-              de: "Dadurch werden alle gespeicherten Bluetooth-Wallboxen, PINs und alten Bluetooth-Einstellungen gelöscht. Fortfahren?",
-            },
-            handler: async (deviceId, actionContext) => {
-              if (deviceId !== "__bluetooth-configuration-error__") {
-                return { refresh: "none" };
-              }
-              try {
-                await this.adapter.resetBluetoothChargerConfiguration();
-              } catch {
-                await actionContext.showMessage({
-                  en: "Could not clear the stored Bluetooth configuration.",
-                  de: "Die gespeicherte Bluetooth-Konfiguration konnte nicht gelöscht werden.",
-                });
-                return { refresh: "none" };
-              }
-              await actionContext.showMessage({
-                en: "Bluetooth configuration cleared. Add chargers again in the Device Manager and restart the adapter.",
-                de: "Bluetooth-Konfiguration gelöscht. Fügen Sie Wallboxen erneut im Gerätemanager hinzu und starten Sie den Adapter neu.",
-              });
-              return { refresh: "instance" };
-            },
-          },
-        ],
-      });
-      return;
-    }
-    context.setTotalDevices(chargers.length);
-    for (const charger of chargers) {
-      context.addDevice(this.getChargerInfo(charger));
-    }
-  }
-
-  protected getDeviceInfo(deviceId: string): DeviceInfo<string> {
-    let charger: BluetoothChargerConfig | undefined;
-    try {
-      charger = this.adapter
-        .getConfiguredBluetoothChargers()
-        .find((item) => item.serialNumber === deviceId);
-    } catch (error) {
-      throw getStoredBluetoothConfigurationError(error);
-    }
-    if (!charger) {
-      throw new Error("Bluetooth charger is not configured");
-    }
-    return this.getChargerInfo(charger);
-  }
-
-  private getChargerInfo(charger: BluetoothChargerConfig): DeviceInfo<string> {
-    const serialNumber = charger.serialNumber;
-    return {
-      id: serialNumber,
-      identifier: serialNumber,
-      name: charger.name || serialNumber,
-      connectionType: "bluetooth",
-      status: {
-        connection: {
-          stateId: `${this.adapter.namespace}.${serialNumber}.info.bluetoothConnection`,
-          mapping: { true: "connected", false: "disconnected" },
-        },
-      },
-      customInfo: {
-        id: serialNumber,
-        schema: {
-          type: "panel",
-          items: {
-            totalPower: {
-              type: "state",
-              oid: `${this.adapter.namespace}.${serialNumber}.status.totalPower`,
-              foreign: true,
-              control: "text",
-              label: {
-                en: "Charging power",
-                de: "Ladeleistung",
-                es: "Potencia de carga",
-                fr: "Puissance de charge",
-                it: "Potenza di ricarica",
-                nl: "Laadvermogen",
-                pl: "Moc ładowania",
-                pt: "Potência de carregamento",
-                ru: "Мощность зарядки",
-                uk: "Потужність заряджання",
-                "zh-cn": "充电功率",
-              },
-              unit: "kW",
-            },
-            bluetoothRSSI: {
-              type: "state",
-              oid: `${this.adapter.namespace}.${serialNumber}.info.bluetoothRSSI`,
-              foreign: true,
-              control: "text",
-              label: {
-                en: "Bluetooth signal strength",
-                de: "Bluetooth-Signalstärke",
-                es: "Intensidad de la señal Bluetooth",
-                fr: "Intensité du signal Bluetooth",
-                it: "Intensità del segnale Bluetooth",
-                nl: "Bluetooth-signaalsterkte",
-                pl: "Siła sygnału Bluetooth",
-                pt: "Intensidade do sinal Bluetooth",
-                ru: "Уровень сигнала Bluetooth",
-                uk: "Рівень сигналу Bluetooth",
-                "zh-cn": "蓝牙信号强度",
-              },
-              unit: "dBm",
-            },
-          },
-        },
-      },
-      actions: [
-        {
-          id: "editBluetoothCharger",
-          icon: "edit",
-          title: { en: "Edit", de: "Bearbeiten" },
-          handler: async (deviceId, context) => {
-            if (deviceId !== serialNumber) {
-              return { refresh: "none" };
-            }
-            const form = await context.showForm(bluetoothChargerFormSchema, {
-              title: {
-                en: "Edit Bluetooth charger",
-                de: "Bluetooth-Wallbox bearbeiten",
-              },
-              data: { serialNumber, name: charger.name, pin: "" },
-              buttons: ["apply", "cancel"],
-            });
-            if (!form) {
-              return { refresh: "none" };
-            }
-            try {
-              await this.adapter.editBluetoothCharger(serialNumber, form);
-            } catch (error) {
-              await context.showMessage(
-                getBluetoothDeviceActionErrorMessage(error, "save"),
-              );
-              return { refresh: "none" };
-            }
-            await context.showMessage({
-              en: "Charger saved. Restart the adapter to apply the change.",
-              de: "Wallbox gespeichert. Starten Sie den Adapter neu, damit die Änderung wirksam wird.",
-            });
-            return { refresh: "instance" };
-          },
-        },
-        {
-          id: "removeBluetoothCharger",
-          icon: "delete",
-          title: { en: "Remove", de: "Entfernen" },
-          confirmation: {
-            en: "Remove this Bluetooth charger?",
-            de: "Diese Bluetooth-Wallbox entfernen?",
-          },
-          handler: async (deviceId, context) => {
-            if (deviceId !== serialNumber) {
-              return { refresh: "none" };
-            }
-            try {
-              await this.adapter.removeBluetoothCharger(serialNumber);
-            } catch (error) {
-              await context.showMessage(
-                getBluetoothDeviceActionErrorMessage(error, "remove"),
-              );
-              return { refresh: "none" };
-            }
-            await context.showMessage({
-              en: "Charger removed. Restart the adapter to apply the change.",
-              de: "Wallbox entfernt. Starten Sie den Adapter neu, damit die Änderung wirksam wird.",
-            });
-            return { refresh: "instance" };
-          },
-        },
-      ],
-    };
+    await this.ensureRegisteredChargerStates(charger, "config");
   }
 }
 

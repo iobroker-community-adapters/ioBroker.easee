@@ -113,17 +113,6 @@ export interface ChargerObservationResult {
 }
 
 /**
- * Converts Easee API observations to the existing charger state fields.
- *
- * @param responseData The response from the Easee observations API.
- */
-export function observationsToChargerState(
-  responseData: ChargerObservationResponse | null | undefined,
-): ChargerObservationState {
-  return observationsToChargerStateWithTimestamps(responseData).state;
-}
-
-/**
  * Converts observations and retains each source timestamp for ordering.
  *
  * @param responseData The response from the Easee observations API.

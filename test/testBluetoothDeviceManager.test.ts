@@ -117,11 +117,10 @@ function createHarness(initialConfig: Record<string, unknown> = {}): {
       untouchedSetting: "keep me",
     },
   };
-  adapter.getForeignObjectAsync = sinon.stub().resolves(storedObject);
-  adapter.setForeignObjectAsync = sinon
+  adapter.extendForeignObjectAsync = sinon
     .stub()
     .callsFake((_id: string, object: { native: Record<string, unknown> }) => {
-      Object.assign(storedObject, object);
+      Object.assign(storedObject.native, object.native);
       return Promise.resolve();
     });
   const manager = new TestDeviceManagement(adapter);
@@ -229,7 +228,7 @@ describe("Bluetooth charger Device Manager", () => {
     expect(device.controls).to.be.undefined;
   });
 
-  it("adds a charger, encrypts its PIN, and leaves legacy configuration untouched", async () => {
+  it("adds a charger, encrypts its PIN, and clears migrated legacy configuration", async () => {
     const { adapter, manager, storedObject } = createHarness({
       bluetoothCharger1SerialNumber: "EMX123456",
       bluetoothCharger1Pin: "1234",
@@ -262,7 +261,9 @@ describe("Bluetooth charger Device Manager", () => {
         name: "New charger",
       },
     ]);
-    expect(storedObject.native.bluetoothCharger1Pin).to.equal("1234");
+    expect(storedObject.native.bluetoothChargers).to.equal("");
+    expect(storedObject.native.bluetoothCharger1SerialNumber).to.equal("");
+    expect(storedObject.native.bluetoothCharger1Pin).to.equal("");
     expect(storedObject.native.untouchedSetting).to.equal("keep me");
     expect(JSON.stringify(storedObject.native)).not.to.include("5678");
   });
@@ -307,7 +308,7 @@ describe("Bluetooth charger Device Manager", () => {
     expect(devices).to.have.length(1);
     expect(devices[0].name).to.deep.include({
       en: "Bluetooth configuration error: Stored Bluetooth charger entry 1 field pin could not be decrypted.",
-      de: "Fehler in der Bluetooth-Konfiguration: Der PIN in Eintrag 1, Feld pin, der gespeicherten Bluetooth-Konfiguration konnte nicht entschlüsselt werden.",
+      de: "Bluetooth-Konfigurationsfehler: Der PIN in Eintrag 1, Feld pin, der gespeicherten Bluetooth-Konfiguration konnte nicht entschlüsselt werden.",
     });
     const output = JSON.stringify({ devices, logs: adapter.log });
     expect(output).not.to.include("stored-ciphertext-secret");
@@ -345,13 +346,13 @@ describe("Bluetooth charger Device Manager", () => {
     expect(message).not.to.include("new-submitted-pin");
     expect(message).not.to.include("stored-ciphertext-secret");
     expect(message).not.to.include("decrypt-error-secret");
-    expect(adapter.setForeignObjectAsync.called).to.equal(false);
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
     expect(adapter.encrypt.called).to.equal(false);
     expect(adapter.log.error.called).to.equal(false);
     expect(adapter.log.warn.called).to.equal(false);
   });
 
-  it("continues loading and preserving the legacy JSON configuration", async () => {
+  it("migrates legacy JSON to encrypted canonical storage idempotently", async () => {
     const legacyJson =
       '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
     const { adapter, manager, storedObject } = createHarness({
@@ -361,18 +362,81 @@ describe("Bluetooth charger Device Manager", () => {
       "EMX123456",
     ]);
 
-    await adapter.addBluetoothCharger({
-      serialNumber: "EMX654321",
-      pin: "5678",
-      name: "Added",
-    });
-
-    expect(storedObject.native.bluetoothChargers).to.equal(legacyJson);
+    await adapter.migrateBluetoothConfiguration();
+    expect(storedObject.native.bluetoothChargers).to.equal("");
+    expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
+    expect(storedObject.native.bluetoothChargerList).to.deep.equal([
+      {
+        serialNumber: "EMX123456",
+        pin: "easee:v1:encrypted-31323334",
+        name: "Old JSON charger",
+      },
+    ]);
+    expect(adapter.extendForeignObjectAsync.calledOnce).to.equal(true);
+    await adapter.migrateBluetoothConfiguration();
+    expect(adapter.extendForeignObjectAsync.calledOnce).to.equal(true);
     expect(
       adapter
         .getConfiguredBluetoothChargers()
         .map((entry: { serialNumber: string }) => entry.serialNumber),
-    ).to.deep.equal(["EMX123456", "EMX654321"]);
+    ).to.deep.equal(["EMX123456"]);
+  });
+
+  it("migrates legacy slots and clears every legacy PIN field", async () => {
+    const { adapter, storedObject } = createHarness({
+      bluetoothCharger1SerialNumber: "EMX123456",
+      bluetoothCharger1Pin: "1234",
+      bluetoothCharger1Name: "Legacy slot",
+    });
+
+    await adapter.migrateBluetoothConfiguration();
+
+    expect(storedObject.native.bluetoothChargerList).to.deep.equal([
+      {
+        serialNumber: "EMX123456",
+        pin: "easee:v1:encrypted-31323334",
+        name: "Legacy slot",
+      },
+    ]);
+    expect(storedObject.native.bluetoothCharger1SerialNumber).to.equal("");
+    expect(storedObject.native.bluetoothCharger1Pin).to.equal("");
+    expect(storedObject.native.bluetoothCharger1Name).to.equal("");
+  });
+
+  it("preserves legacy configuration when canonical migration persistence fails", async () => {
+    const legacyJson =
+      '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
+    const { adapter, storedObject } = createHarness({
+      bluetoothChargers: legacyJson,
+    });
+    const originalStoredNative = { ...storedObject.native };
+    adapter.extendForeignObjectAsync.rejects(new Error("save failed"));
+
+    const migrationError = await adapter
+      .migrateBluetoothConfiguration()
+      .catch((error: unknown) => error);
+    expect(migrationError).to.be.instanceOf(Error);
+    expect(storedObject.native).to.deep.equal(originalStoredNative);
+    expect(adapter.config.bluetoothChargers).to.equal(legacyJson);
+    expect(adapter.config.bluetoothChargerListManaged).to.equal(false);
+  });
+
+  it("preserves legacy configuration when migration encryption fails", async () => {
+    const legacyJson =
+      '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
+    const { adapter, storedObject } = createHarness({
+      bluetoothChargers: legacyJson,
+    });
+    const originalStoredNative = { ...storedObject.native };
+    adapter.encrypt.throws(new Error("encryption failed"));
+
+    const migrationError = await adapter
+      .migrateBluetoothConfiguration()
+      .catch((error: unknown) => error);
+    expect(migrationError).to.be.instanceOf(Error);
+    expect(storedObject.native).to.deep.equal(originalStoredNative);
+    expect(adapter.config.bluetoothChargers).to.equal(legacyJson);
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
   });
 
   it("edits a charger while preserving its encrypted PIN when the field is blank", async () => {
@@ -437,7 +501,7 @@ describe("Bluetooth charger Device Manager", () => {
     });
     expect(storedObject.native.bluetoothChargerList).to.deep.equal([]);
     expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
-    expect(storedObject.native.bluetoothCharger2Pin).to.equal("8765");
+    expect(storedObject.native.bluetoothCharger2Pin).to.equal("");
     expect(adapter.getConfiguredBluetoothChargers()).to.deep.equal([]);
   });
 
@@ -454,7 +518,7 @@ describe("Bluetooth charger Device Manager", () => {
     const add = actionById(manager.getInfo().actions!, "addBluetoothCharger");
 
     expect(await add.handler!(context)).to.deep.equal({ refresh: false });
-    expect(adapter.setForeignObjectAsync.called).to.equal(false);
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
     expect(
       JSON.stringify(context.showMessage.firstCall.args[0]),
     ).not.to.include("sensitive-pin");
@@ -494,6 +558,6 @@ describe("Bluetooth charger Device Manager", () => {
     expect(() => manager.getDevice("EMX654321")).to.throw(
       "Bluetooth charger is not configured",
     );
-    expect(adapter.setForeignObjectAsync.called).to.equal(false);
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
   });
 });

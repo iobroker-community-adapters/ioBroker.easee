@@ -126,6 +126,12 @@ describe("connection mode configuration", () => {
     expect(error.source).to.equal("stored");
     expect(error.message).to.contain("bluetoothChargerList");
     expect(error.message).to.contain("must be a list");
+    expect(error.diagnostic).to.deep.equal({
+      type: "validation",
+      field: "bluetoothChargerList",
+      reason: "must be a list",
+      setting: "bluetoothChargerList",
+    });
   });
 
   it("continues using existing legacy settings while the managed list is empty", () => {

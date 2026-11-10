@@ -28,6 +28,7 @@ import type {
   BluetoothLink,
   BluetoothScanner,
 } from "./bluetooth-transport.ts";
+import { validateTimeoutMs } from "./timeout.ts";
 
 type NobleFactory = (binding?: NobleBinding) => Promise<Noble>;
 type NobleBluetoothScannerInterfaces = BluetoothScanner &
@@ -37,16 +38,36 @@ type NobleBinding = "default" | "hci" | "dbus" | "mac" | "win";
 const NOBLE_BINDINGS = new Set(["hci", "dbus", "mac", "win"]);
 
 /**
+ * Ensures the Noble package itself can resolve its optional D-Bus peer.
+ *
+ * @param resolveDependency Resolver rooted at Noble's module path.
+ */
+export function ensureNobleDbusDependency(
+  resolveDependency: (moduleName: string) => string,
+): void {
+  try {
+    resolveDependency("dbus-next");
+  } catch (error) {
+    throw new Error(
+      'The Noble D-Bus binding cannot resolve "dbus-next". Reinstall the adapter dependencies so it is available to @stoprocent/noble.',
+      { cause: error },
+    );
+  }
+}
+
+/**
  * Selects a Noble binding, preferring an explicit adapter setting over environment overrides.
  *
  * @param platform - Runtime platform.
  * @param configuredBinding - Adapter setting; `auto` defers to the environment or platform default.
  * @param environmentBinding - Optional `NOBLE_BINDINGS` override.
+ * @param automaticHciFallback - Whether Automatic should use Raw HCI as a fallback.
  */
 export function resolveNobleBinding(
   platform: NodeJS.Platform,
   configuredBinding?: string,
   environmentBinding?: string,
+  automaticHciFallback?: boolean,
 ): NobleBinding {
   const configured = configuredBinding?.trim().toLowerCase();
   if (configured && configured !== "auto" && NOBLE_BINDINGS.has(configured)) {
@@ -56,6 +77,10 @@ export function resolveNobleBinding(
   const environment = environmentBinding?.trim().toLowerCase();
   if (environment && NOBLE_BINDINGS.has(environment)) {
     return environment as NobleBinding;
+  }
+
+  if (platform === "linux" && automaticHciFallback) {
+    return "hci";
   }
 
   return platform === "linux" ? "dbus" : "default";
@@ -174,9 +199,7 @@ export async function pairBluezDevice(
   timeoutMs = BLUEZ_PAIR_TIMEOUT_MS,
   busFactory: () => MessageBus = systemBus,
 ): Promise<void> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new RangeError("BlueZ pairing timeout must be positive");
-  }
+  validateTimeoutMs(timeoutMs, "BlueZ pairing timeout");
   const bus = busFactory();
   bus.on("error", () => undefined);
   const timeoutMessage = `BlueZ pairing timed out after ${timeoutMs} ms`;
@@ -222,6 +245,25 @@ export async function pairBluezDevice(
   }
 }
 
+function canNobleResolveDependency(moduleName: string): boolean {
+  try {
+    const requireFromAdapter = createRequire(__filename);
+    const noblePath = requireFromAdapter.resolve("@stoprocent/noble");
+    createRequire(noblePath).resolve(moduleName);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canNobleResolveDbusDependency(): boolean {
+  return canNobleResolveDependency("dbus-next");
+}
+
+function canNobleResolveHciDependency(): boolean {
+  return canNobleResolveDependency("@stoprocent/bluetooth-hci-socket");
+}
+
 async function loadDefaultNoble(binding?: NobleBinding): Promise<Noble> {
   const selectedBinding =
     binding ??
@@ -231,9 +273,17 @@ async function loadDefaultNoble(binding?: NobleBinding): Promise<Noble> {
       process.env.NOBLE_BINDINGS,
     );
 
+  const requireFromAdapter = createRequire(__filename);
+  if (selectedBinding === "dbus") {
+    const noblePath = requireFromAdapter.resolve("@stoprocent/noble");
+    const requireFromNoble = createRequire(noblePath);
+    ensureNobleDbusDependency((moduleName) =>
+      requireFromNoble.resolve(moduleName),
+    );
+  }
+
   if (selectedBinding === "hci") {
     try {
-      const requireFromAdapter = createRequire(__filename);
       const gattConstructor = requireFromAdapter(
         "@stoprocent/noble/lib/hci-socket/gatt.js",
       ) as { prototype?: unknown };
@@ -914,9 +964,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     options?: BluetoothDiscoveryOptions,
   ): Promise<readonly BluetoothCandidate[]> {
     this.assertOpen();
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new RangeError("BLE discovery timeout must be a positive number");
-    }
+    validateTimeoutMs(timeoutMs, "BLE discovery timeout");
     if (this.discoveryInFlight) {
       throw new Error("BLE discovery is already in progress");
     }
@@ -1415,11 +1463,28 @@ export async function createNobleBluetoothScanner(
   configuredBinding?: string,
   diagnosticLogger?: BluetoothDiagnosticLogger,
 ): Promise<NobleBluetoothScanner> {
+  const environmentBinding = process.env.NOBLE_BINDINGS;
+  const selectedBinding = resolveNobleBinding(
+    process.platform,
+    configuredBinding,
+    environmentBinding,
+  );
+  const automaticHciFallback =
+    factory === loadDefaultNoble &&
+    selectedBinding === "dbus" &&
+    !canNobleResolveDbusDependency() &&
+    canNobleResolveHciDependency();
   const binding = resolveNobleBinding(
     process.platform,
     configuredBinding,
-    process.env.NOBLE_BINDINGS,
+    environmentBinding,
+    automaticHciFallback,
   );
+  if (automaticHciFallback && binding === "hci") {
+    diagnosticLogger?.debug(
+      'Noble D-Bus binding cannot resolve "dbus-next"; Automatic is falling back to Raw HCI.',
+    );
+  }
   return new NobleBluetoothScanner(
     await factory(binding),
     binding,

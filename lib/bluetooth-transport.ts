@@ -61,5 +61,3 @@ export interface BluetoothScanner {
   connect(candidate: BluetoothCandidate): Promise<BluetoothLink>;
   close(): Promise<void>;
 }
-
-export type BluetoothTransportFactory = () => BluetoothScanner;

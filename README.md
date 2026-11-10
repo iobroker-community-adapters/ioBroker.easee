@@ -91,6 +91,10 @@ This adapter would not have been possible without the great work of @Newan (http
 - (Voodoo2man) Improved Cloud status and session updates, including when site information is unavailable.
 - (Voodoo2man) Improved charger control reliability for current limits and commands.
 - Exposed only datapoints supported by the selected Cloud or Bluetooth connection mode and removed unsupported adapter-created datapoints after switching modes.
+- Redacted sensitive SignalR diagnostics and validated Cloud phase modes and Bluetooth timeout limits.
+- Migrated legacy Bluetooth charger settings to encrypted canonical storage and translated Device Manager actions and diagnostics in all supported locales.
+- Consolidated charger state metadata, fixed `lastUpdate` metadata, and removed unused helpers and obsolete translation keys.
+- Updated the D-Bus runtime dependency to a compatible maintained fork and resolved reported production audit findings.
 
 ### 3.2.0 (2026-11-07)
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
@@ -126,7 +130,7 @@ MIT License
 
 
 Copyright (c) 2026 iobroker-community-adapters <iobroker-community-adapters@gmx.de>  
-Copyright (c) 2025 Newan <iobroker@newan.de>
+Copyright (c) 2025 Newan <info@newan.de>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

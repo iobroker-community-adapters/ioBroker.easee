@@ -44,7 +44,6 @@ describe("Bluetooth datapoint mapping", () => {
         dynamicCircuitCurrentP2: 0,
         dynamicCircuitCurrentP3: 0,
       },
-      values: {},
     };
 
     expect(mapBluetoothPoll(result)).to.include({
@@ -75,7 +74,6 @@ describe("Bluetooth datapoint mapping", () => {
     const result: BluetoothPollResult = {
       config: { isEnabled: 2, cableLocked: 2 },
       state: { chargerOpMode: Number.NaN, localRSSI: Number.NaN },
-      values: {},
     };
     expect(mapBluetoothPoll(result)).to.deep.equal({});
   });

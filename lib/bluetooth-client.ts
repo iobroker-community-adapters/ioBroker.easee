@@ -25,6 +25,7 @@ import type {
   BluetoothLink,
   BluetoothScanner,
 } from "./bluetooth-transport.ts";
+import { MAX_NODE_TIMEOUT_MS, validateTimeoutMs } from "./timeout.ts";
 
 export interface BluetoothDeviceConfig {
   readonly serial: string;
@@ -40,6 +41,12 @@ export interface BluetoothStatusEvent {
   readonly name: string;
   readonly status: BluetoothConnectionStatus;
   readonly error?: Error;
+  /** Current scan/connect cycle number, from 1 to maxAttempts. */
+  readonly attempt?: number;
+  /** Maximum number of scan/connect cycles for this charger. */
+  readonly maxAttempts?: number;
+  /** True on the final disconnected event after all attempts fail. */
+  readonly retryExhausted?: boolean;
 }
 
 export interface BluetoothClientCallbacks {
@@ -61,7 +68,6 @@ export interface BluetoothClientOptions extends BluetoothClientCallbacks {
 export interface BluetoothPollResult {
   readonly config: Readonly<Record<string, BluetoothValue>>;
   readonly state: Readonly<Record<string, BluetoothValue>>;
-  readonly values: Readonly<Record<string, BluetoothValue>>;
 }
 
 interface PendingNotification {
@@ -84,6 +90,8 @@ interface DeviceConnection {
   pairAttempted: boolean;
   operationTail: Promise<void>;
 }
+
+const MAX_CONNECTION_ATTEMPTS = 3;
 
 const CHANNELS: readonly BluetoothChannel[] = [
   "hello",
@@ -124,6 +132,8 @@ export class BluetoothClient {
   private readonly callbacks: BluetoothClientCallbacks;
   private readonly diagnosticLogger?: BluetoothDiagnosticLogger;
   private readonly connections = new Map<string, DeviceConnection>();
+  private readonly connectionAttempts = new Map<string, number>();
+  private readonly attemptingDevices = new Set<string>();
   private readonly connecting = new Set<DeviceConnection>();
   private started = false;
   private stopping = false;
@@ -148,9 +158,19 @@ export class BluetoothClient {
     }
     this.devices = devices.map((device) => ({ ...device }));
     this.scanner = scanner;
-    this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 8000;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 5000;
-    this.setupTimeoutMs = options.setupTimeoutMs ?? 15000;
+    this.discoveryTimeoutMs = validateTimeoutMs(
+      options.discoveryTimeoutMs ?? 8000,
+      "BLE discovery timeout",
+      MAX_NODE_TIMEOUT_MS - 1000,
+    );
+    this.requestTimeoutMs = validateTimeoutMs(
+      options.requestTimeoutMs ?? 5000,
+      "BLE request timeout",
+    );
+    this.setupTimeoutMs = validateTimeoutMs(
+      options.setupTimeoutMs ?? 15000,
+      "BLE setup timeout",
+    );
     this.maxCandidatesPerDevice = options.maxCandidatesPerDevice ?? 8;
     this.diagnosticLogger = options.diagnosticLogger;
     this.callbacks = {
@@ -158,15 +178,10 @@ export class BluetoothClient {
       onDisconnect: options.onDisconnect,
     };
     if (
-      [
-        this.discoveryTimeoutMs,
-        this.requestTimeoutMs,
-        this.setupTimeoutMs,
-      ].some((timeout) => !Number.isFinite(timeout) || timeout <= 0) ||
       !Number.isInteger(this.maxCandidatesPerDevice) ||
       this.maxCandidatesPerDevice <= 0
     ) {
-      throw new RangeError("BLE timeouts and candidate limit must be positive");
+      throw new RangeError("BLE candidate limit must be a positive integer");
     }
   }
 
@@ -240,6 +255,15 @@ export class BluetoothClient {
     return task;
   }
 
+  /** Returns true if any disconnected charger has not reached its attempt limit. */
+  hasReconnectAttemptsRemaining(): boolean {
+    return this.devices.some(
+      ({ serial }) =>
+        !this.connections.has(serial) &&
+        (this.connectionAttempts.get(serial) ?? 0) < MAX_CONNECTION_ATTEMPTS,
+    );
+  }
+
   async poll(serial: string): Promise<BluetoothPollResult> {
     const connection = this.getConnection(serial);
     return this.enqueue(connection, async () => {
@@ -248,7 +272,6 @@ export class BluetoothClient {
       return {
         config: config.named,
         state: state.named,
-        values: { ...config.named, ...state.named },
       };
     });
   }
@@ -281,98 +304,148 @@ export class BluetoothClient {
       if (this.stopping) {
         return;
       }
-      if (this.connections.has(config.serial)) {
+      if (
+        this.connections.has(config.serial) ||
+        this.attemptingDevices.has(config.serial)
+      ) {
         continue;
       }
-      this.emitStatus(config, "scanning");
-      const discoveryStartedAt = bluetoothDiagnosticNow();
+      const attempt = (this.connectionAttempts.get(config.serial) ?? 0) + 1;
+      if (attempt > MAX_CONNECTION_ATTEMPTS) {
+        continue;
+      }
+      this.connectionAttempts.set(config.serial, attempt);
+      this.attemptingDevices.add(config.serial);
+      try {
+        await this.connectConfiguredDevice(
+          config,
+          attempt,
+          claimedCandidateIds,
+        );
+      } finally {
+        this.attemptingDevices.delete(config.serial);
+      }
+    }
+  }
+
+  private async connectConfiguredDevice(
+    config: BluetoothDeviceConfig,
+    attempt: number,
+    claimedCandidateIds: Set<string>,
+  ): Promise<void> {
+    const attemptMetadata = {
+      attempt,
+      maxAttempts: MAX_CONNECTION_ATTEMPTS,
+    };
+    this.emitStatus(config, "scanning", undefined, attemptMetadata);
+    const discoveryStartedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "client.discovery",
+      "started",
+      {
+        fields: { timeoutMs: this.discoveryTimeoutMs },
+      },
+    );
+    let candidates: readonly BluetoothCandidate[];
+    try {
+      candidates = await this.withTimeout(
+        this.scanner.discover(BLUETOOTH_SERVICE_UUID, this.discoveryTimeoutMs, {
+          fallbackLocalName: config.serial,
+        }),
+        this.discoveryTimeoutMs + 1000,
+        "Timed out scanning for BLE chargers",
+      );
       logBluetoothDiagnostic(
         this.diagnosticLogger,
         "client.discovery",
-        "started",
+        "completed",
         {
-          fields: { timeoutMs: this.discoveryTimeoutMs },
+          durationMs: bluetoothDiagnosticNow() - discoveryStartedAt,
+          fields: { candidates: candidates.length },
         },
       );
-      let candidates: readonly BluetoothCandidate[];
-      try {
-        candidates = await this.withTimeout(
-          this.scanner.discover(
-            BLUETOOTH_SERVICE_UUID,
-            this.discoveryTimeoutMs,
-            { fallbackLocalName: config.serial },
-          ),
-          this.discoveryTimeoutMs + 1000,
-          "Timed out scanning for BLE chargers",
-        );
-        logBluetoothDiagnostic(
-          this.diagnosticLogger,
-          "client.discovery",
-          "completed",
-          {
-            durationMs: bluetoothDiagnosticNow() - discoveryStartedAt,
-            fields: { candidates: candidates.length },
-          },
-        );
-      } catch (error) {
-        logBluetoothDiagnostic(
-          this.diagnosticLogger,
-          "client.discovery",
-          "failed",
-          {
-            durationMs: bluetoothDiagnosticNow() - discoveryStartedAt,
-            error,
-          },
-        );
-        this.emitStatus(config, "disconnected", errorFrom(error));
-        continue;
-      }
-
-      let connected = false;
-      const unclaimedCandidates = candidates.filter(
-        (candidate) => !claimedCandidateIds.has(candidate.id),
+    } catch (error) {
+      logBluetoothDiagnostic(
+        this.diagnosticLogger,
+        "client.discovery",
+        "failed",
+        {
+          durationMs: bluetoothDiagnosticNow() - discoveryStartedAt,
+          error,
+        },
       );
-      const potentialCandidates = unclaimedCandidates
-        .filter((candidate) => candidate.connectable !== false)
-        .slice(0, this.maxCandidatesPerDevice);
-      if (potentialCandidates.length === 0) {
-        const reason =
-          candidates.length === 0
-            ? "No advertisements matching the Easee service UUID or configured charger name were found"
-            : unclaimedCandidates.length === 0
-              ? "All matching BLE advertisements were already assigned to another configured charger"
-              : "Matching BLE advertisements were not connectable; open the charger's Bluetooth window and retry";
-        this.emitStatus(config, "disconnected", new Error(reason));
-        continue;
+      if (!this.stopping) {
+        this.emitStatus(config, "disconnected", errorFrom(error), {
+          ...attemptMetadata,
+          retryExhausted: attempt === MAX_CONNECTION_ATTEMPTS,
+        });
       }
-      for (const candidate of potentialCandidates) {
-        if (this.stopping) {
+      return;
+    }
+
+    const unclaimedCandidates = candidates.filter(
+      (candidate) => !claimedCandidateIds.has(candidate.id),
+    );
+    const potentialCandidates = unclaimedCandidates
+      .filter((candidate) => candidate.connectable !== false)
+      .slice(0, this.maxCandidatesPerDevice);
+    if (potentialCandidates.length === 0) {
+      const reason =
+        candidates.length === 0
+          ? "No advertisements matching the Easee service UUID or configured charger name were found"
+          : unclaimedCandidates.length === 0
+            ? "All matching BLE advertisements were already assigned to another configured charger"
+            : "Matching BLE advertisements were not connectable; open the charger's Bluetooth window and retry";
+      this.emitStatus(config, "disconnected", new Error(reason), {
+        ...attemptMetadata,
+        retryExhausted: attempt === MAX_CONNECTION_ATTEMPTS,
+      });
+      return;
+    }
+
+    let connected = false;
+    let failureError: Error | undefined;
+    for (const candidate of potentialCandidates) {
+      if (this.stopping) {
+        return;
+      }
+      this.emitStatus(config, "connecting", undefined, attemptMetadata);
+      let connection: DeviceConnection | undefined;
+      try {
+        connection = await this.authenticateCandidate(config, candidate);
+        if (this.stopping || !connection.connected) {
+          await this.closeConnection(connection);
           return;
         }
-        this.emitStatus(config, "connecting");
-        let connection: DeviceConnection | undefined;
-        try {
-          connection = await this.authenticateCandidate(config, candidate);
-          if (this.stopping || !connection.connected) {
-            await this.closeConnection(connection);
-            return;
-          }
-          claimedCandidateIds.add(candidate.id);
-          this.connections.set(config.serial, connection);
-          this.emitStatus(config, "connected");
-          connected = true;
-          break;
-        } catch (error) {
-          if (connection) {
-            this.connecting.delete(connection);
-            await this.closeConnection(connection);
-          }
-          this.emitStatus(config, "connecting", errorFrom(error));
+        claimedCandidateIds.add(candidate.id);
+        this.connections.set(config.serial, connection);
+        this.connectionAttempts.delete(config.serial);
+        this.emitStatus(config, "connected", undefined, attemptMetadata);
+        connected = true;
+        break;
+      } catch (error) {
+        if (connection) {
+          this.connecting.delete(connection);
+          await this.closeConnection(connection);
         }
+        failureError = errorFrom(error);
+        this.emitStatus(config, "connecting", failureError, attemptMetadata);
       }
-      if (!connected && !this.stopping) {
-        this.emitStatus(config, "disconnected");
-      }
+    }
+    if (!connected && !this.stopping) {
+      this.emitStatus(
+        config,
+        "disconnected",
+        failureError ??
+          new Error(
+            "All matching BLE devices failed to connect or authenticate",
+          ),
+        {
+          ...attemptMetadata,
+          retryExhausted: attempt === MAX_CONNECTION_ATTEMPTS,
+        },
+      );
     }
   }
 
@@ -1028,6 +1101,10 @@ export class BluetoothClient {
     device: BluetoothDeviceConfig,
     status: BluetoothConnectionStatus,
     error?: Error,
+    metadata: Pick<
+      BluetoothStatusEvent,
+      "attempt" | "maxAttempts" | "retryExhausted"
+    > = {},
   ): void {
     logBluetoothDiagnostic(
       this.diagnosticLogger,
@@ -1036,11 +1113,13 @@ export class BluetoothClient {
       error === undefined ? {} : { error },
     );
     try {
-      this.callbacks.onStatus?.(
-        error
-          ? { serial: device.serial, name: device.name, status, error }
-          : { serial: device.serial, name: device.name, status },
-      );
+      this.callbacks.onStatus?.({
+        serial: device.serial,
+        name: device.name,
+        status,
+        ...(error ? { error } : {}),
+        ...metadata,
+      });
     } catch {
       // Status consumers do not own BLE lifecycle control.
     }

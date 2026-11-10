@@ -71,6 +71,7 @@ interface ManualScanAdapter {
   bluetoothCircuitWritesInFlight: number;
   bluetoothReconnectInFlight: boolean;
   bluetoothConnections: Map<string, boolean>;
+  bluetoothConnectingLogged: Set<string>;
   bluetoothChargers: Array<{
     serialNumber: string;
     pin: string;
@@ -101,7 +102,12 @@ interface ManualScanAdapter {
   clearTimeout: sinon.SinonStub;
   scheduleBluetoothPoll: sinon.SinonStub;
   scheduleBluetoothReconnect: sinon.SinonStub;
-  log: { info: sinon.SinonStub; warn: sinon.SinonStub };
+  log: {
+    debug: sinon.SinonStub;
+    error: sinon.SinonStub;
+    info: sinon.SinonStub;
+    warn: sinon.SinonStub;
+  };
   runBluetoothManualScan(): Promise<ScanResponse>;
   updateBluetoothAdapterState(state: BluetoothAdapterState): void;
   updateBluetoothSearchReadiness(): Promise<void>;
@@ -174,6 +180,7 @@ function createHarness(
     bluetoothCircuitWritesInFlight: 0,
     bluetoothReconnectInFlight: false,
     bluetoothConnections: new Map([["EMX123456", true]]),
+    bluetoothConnectingLogged: new Set(),
     bluetoothChargers: [
       { serialNumber: "EMX123456", pin: "secret-pin", name: "Garage" },
     ],
@@ -203,7 +210,12 @@ function createHarness(
     clearTimeout: sinon.stub(),
     scheduleBluetoothPoll: sinon.stub(),
     scheduleBluetoothReconnect: sinon.stub(),
-    log: { info: sinon.stub(), warn: sinon.stub() },
+    log: {
+      debug: sinon.stub(),
+      error: sinon.stub(),
+      info: sinon.stub(),
+      warn: sinon.stub(),
+    },
   });
   return { adapter, scanner, stateWrites };
 }
@@ -487,6 +499,7 @@ describe("manual Bluetooth search", () => {
   it("persists live adapter states and ignores state events after shutdown", async () => {
     const { adapter, stateWrites } = createHarness();
 
+    adapter.updateBluetoothAdapterState("unknown");
     adapter.updateBluetoothAdapterState("poweredOn");
     await adapter.bluetoothAdapterStateWrite;
     expect(
@@ -514,9 +527,14 @@ describe("manual Bluetooth search", () => {
       lastStateValue(stateWrites, "info.bluetoothSearchReadinessDisplay"),
     ).to.equal("Ready to search for nearby chargers.");
     sinon.assert.calledWithExactly(
-      adapter.log.info,
-      "Local Bluetooth adapter state: poweredOn.",
+      adapter.log.debug,
+      "Local Bluetooth adapter state: unknown.",
     );
+    sinon.assert.calledWithExactly(
+      adapter.log.debug,
+      "Local Bluetooth adapter state changed from unknown to poweredOn.",
+    );
+    sinon.assert.notCalled(adapter.log.info);
 
     const writesBeforeShutdown = stateWrites.callCount;
     adapter.unloading = true;
@@ -539,6 +557,87 @@ describe("manual Bluetooth search", () => {
     ).to.equal("The adapter is stopping.");
   });
 
+  it("logs one connecting state and reports failure only after three attempts", () => {
+    const { adapter } = createHarness();
+    const identity = { serial: "EMX123456", name: "Garage" };
+
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "scanning",
+      attempt: 1,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "connecting",
+      attempt: 1,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "connecting",
+      error: new Error("Unknown Connection Identifier (0x2)"),
+      attempt: 1,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "disconnected",
+      error: new Error("Unknown Connection Identifier (0x2)"),
+      attempt: 1,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "scanning",
+      attempt: 2,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "connecting",
+      attempt: 2,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "disconnected",
+      error: new Error("Disconnected 62"),
+      attempt: 2,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "scanning",
+      attempt: 3,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "connecting",
+      attempt: 3,
+      maxAttempts: 3,
+    });
+    adapter.handleBluetoothStatus({
+      ...identity,
+      status: "disconnected",
+      error: new Error("Disconnected 62"),
+      attempt: 3,
+      maxAttempts: 3,
+      retryExhausted: true,
+    });
+
+    sinon.assert.calledOnceWithExactly(
+      adapter.log.info,
+      "Bluetooth connection state: connecting",
+    );
+    sinon.assert.calledOnceWithExactly(
+      adapter.log.error,
+      "Bluetooth connection failed after 3 attempts for Garage: Disconnected 62",
+    );
+    sinon.assert.notCalled(adapter.log.warn);
+  });
+
   it("logs connection errors without exposing configured PINs", async () => {
     const { adapter, stateWrites } = createHarness();
 
@@ -553,6 +652,8 @@ describe("manual Bluetooth search", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     const logs = [
+      ...adapter.log.debug.getCalls(),
+      ...adapter.log.error.getCalls(),
       ...adapter.log.info.getCalls(),
       ...adapter.log.warn.getCalls(),
     ]
@@ -889,7 +990,7 @@ describe("manual Bluetooth search", () => {
     ).to.equal("Busy: Bluetooth reconnection is active.");
     sinon.assert.calledWithExactly(
       adapter.log.info,
-      "Manual Bluetooth search not started: Bluetooth reconnection is active (startupComplete=true, scanInFlight=false, pollInFlight=false, writesInFlight=0, circuitWritesPending=0, circuitWritesActive=0, reconnectInFlight=true).",
+      "Manual Bluetooth search not started: Bluetooth reconnection is active (adapterState=unknown, scannerAvailable=true, startupComplete=true, scanInFlight=false, pollInFlight=false, writesInFlight=0, circuitWritesPending=0, circuitWritesActive=0, reconnectInFlight=true).",
     );
     sinon.assert.notCalled(scanner.discover);
   });

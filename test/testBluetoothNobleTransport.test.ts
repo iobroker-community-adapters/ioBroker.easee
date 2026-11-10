@@ -15,10 +15,12 @@ import type { BluetoothChannel } from "../lib/bluetooth-protocol.ts";
 import type { BluetoothDiagnosticLogger } from "../lib/bluetooth-diagnostics.ts";
 import {
   createNobleBluetoothScanner,
+  ensureNobleDbusDependency,
   NobleBluetoothScanner,
   pairBluezDevice,
   resolveNobleBinding,
 } from "../lib/noble-bluetooth-transport.ts";
+import { MAX_NODE_TIMEOUT_MS } from "../lib/timeout.ts";
 
 async function expectRejectedWithMessage(
   promise: Promise<unknown>,
@@ -299,6 +301,29 @@ function fakeBluezBus(
 }
 
 describe("BlueZ pairing", () => {
+  it("rejects invalid or over-limit timeouts before opening D-Bus", async () => {
+    let busFactoryCalls = 0;
+    for (const timeoutMs of [
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      MAX_NODE_TIMEOUT_MS + 1,
+    ]) {
+      await expectRejectedWithMessage(
+        pairBluezDevice("58:BF:25:22:05:3A", timeoutMs, () => {
+          busFactoryCalls++;
+          return fakeBluezBus(() => Promise.resolve(), {
+            pairCalls: 0,
+            disconnects: 0,
+          });
+        }),
+        "BlueZ pairing timeout",
+      );
+    }
+    expect(busFactoryCalls).to.equal(0);
+  });
+
   it("pairs the matching BlueZ Device1 object once", async () => {
     const counters = { pairCalls: 0, disconnects: 0 };
     const busFactory = (): MessageBus =>
@@ -337,6 +362,25 @@ describe("BlueZ pairing", () => {
 });
 
 describe("Noble Bluetooth transport", () => {
+  it("rejects invalid discovery timeouts before starting a scan", async () => {
+    const noble = new FakeNoble();
+    const transport = scanner(noble);
+    for (const timeoutMs of [
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      MAX_NODE_TIMEOUT_MS + 1,
+    ]) {
+      await expectRejectedWithMessage(
+        transport.discover(BLUETOOTH_SERVICE_UUID, timeoutMs),
+        "BLE discovery timeout",
+      );
+    }
+    expect(noble.scanFilters).to.deep.equal([]);
+    await transport.close();
+  });
+
   it("uses BlueZ D-Bus by default on Linux and preserves binding precedence", () => {
     expect(resolveNobleBinding("linux")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "hci")).to.equal("hci");
@@ -345,8 +389,29 @@ describe("Noble Bluetooth transport", () => {
     expect(resolveNobleBinding("linux", "auto")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "auto", "hci")).to.equal("hci");
     expect(resolveNobleBinding("linux", "hci", "dbus")).to.equal("hci");
+    expect(resolveNobleBinding("linux", "auto", undefined, true)).to.equal(
+      "hci",
+    );
+    expect(resolveNobleBinding("linux", "auto", undefined, false)).to.equal(
+      "dbus",
+    );
+    expect(resolveNobleBinding("linux", "dbus", undefined, true)).to.equal(
+      "dbus",
+    );
+    expect(resolveNobleBinding("linux", "auto", "dbus", true)).to.equal("dbus");
     expect(resolveNobleBinding("darwin")).to.equal("default");
     expect(scanner(new FakeNoble(), "hci").getBinding()).to.equal("hci");
+  });
+
+  it("reports when Noble cannot resolve its optional D-Bus dependency", () => {
+    expect(() =>
+      ensureNobleDbusDependency(() => {
+        throw new Error("MODULE_NOT_FOUND");
+      }),
+    ).to.throw('The Noble D-Bus binding cannot resolve "dbus-next"');
+    expect(() =>
+      ensureNobleDbusDependency(() => "/node_modules/dbus-next"),
+    ).not.to.throw();
   });
 
   it("loads Noble lazily through withBindings only when its factory is called", async () => {

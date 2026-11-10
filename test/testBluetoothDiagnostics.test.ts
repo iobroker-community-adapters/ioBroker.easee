@@ -4,7 +4,10 @@ export {};
 
 import { expect } from "chai";
 import { describe, it } from "mocha";
-import { logBluetoothDiagnostic } from "../lib/bluetooth-diagnostics.ts";
+import {
+  getBluetoothErrorCategory,
+  logBluetoothDiagnostic,
+} from "../lib/bluetooth-diagnostics.ts";
 
 describe("Bluetooth diagnostics privacy", () => {
   it("uses fixed error categories and does not log generic error details", () => {
@@ -30,6 +33,12 @@ describe("Bluetooth diagnostics privacy", () => {
 
   it("classifies HCI connection identifier failures without logging their message", () => {
     const messages: string[] = [];
+    expect(
+      getBluetoothErrorCategory("Unknown Connection Identifier (0x2)"),
+    ).to.equal("hci_unknown_connection_identifier");
+    expect(getBluetoothErrorCategory("Disconnected 62")).to.equal(
+      "hci_connection_failed",
+    );
 
     logBluetoothDiagnostic(
       { debug: (message) => messages.push(message) },

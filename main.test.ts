@@ -100,6 +100,7 @@ function createAdapterHarness(): ReturnType<typeof createAdapter> {
   adapter.pendingSessionAuthTokenLookups = new Map();
   adapter.chargerIds = [];
   adapter.namespace = "easee.0";
+  adapter.connectionMode = "cloud";
   adapter.reconcileModeSpecificObjects = sinon.stub().resolves();
   adapter.chargerNameQueue = Promise.resolve();
   adapter.chargerNameVersions = new Map();
@@ -160,6 +161,7 @@ function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
   adapter.bluetoothAdapterStateWrite = Promise.resolve();
   adapter.bluetoothConnections = new Map();
   adapter.bluetoothConnectionErrors = new Map();
+  adapter.bluetoothConnectingLogged = new Set();
   adapter.bluetoothConnectionGenerations = new Map();
   adapter.getConfiguredBluetoothChargers = sinon
     .stub()
@@ -263,8 +265,10 @@ describe("Bluetooth startup shutdown races", () => {
     await adapter.startBluetooth();
 
     const infoLogs = JSON.stringify(adapter.log.info.args);
+    const debugLogs = JSON.stringify(adapter.log.debug.args);
     expect(infoLogs).to.include("no chargers are configured");
-    expect(infoLogs).to.include("Using Noble Bluetooth binding: dbus.");
+    expect(debugLogs).to.include("Using Noble Bluetooth binding: dbus.");
+    expect(infoLogs).not.to.include("Using Noble Bluetooth binding");
     expect(infoLogs).not.to.include("configuration is invalid");
     expect(adapter.log.error.called).to.equal(false);
   });
@@ -361,7 +365,10 @@ describe("Bluetooth reconnect backoff", () => {
     const clock = sinon.useFakeTimers();
     const reconnect = sinon.stub().resolves();
     adapter.bluetoothStartupComplete = true;
-    adapter.bluetoothClient = { reconnect };
+    adapter.bluetoothClient = {
+      hasReconnectAttemptsRemaining: sinon.stub().returns(true),
+      reconnect,
+    };
     adapter.bluetoothConnections = new Map([["TEST0001", false]]);
     adapter.bluetoothReconnectDelay = 10000;
     adapter.bluetoothReconnectTimer = null;
@@ -381,6 +388,35 @@ describe("Bluetooth reconnect backoff", () => {
 
     expect(reconnect.calledOnce).to.equal(true);
     expect(adapter.bluetoothReconnectDelay).to.equal(20000);
+  });
+
+  it("stops scheduling when the client's retry limit is exhausted", async () => {
+    const adapter = createAdapterHarness();
+    const clock = sinon.useFakeTimers();
+    const hasAttempts = sinon.stub().returns(true);
+    const reconnect = sinon.stub().callsFake(() => {
+      hasAttempts.returns(false);
+      return Promise.resolve();
+    });
+    adapter.bluetoothStartupComplete = true;
+    adapter.bluetoothClient = {
+      hasReconnectAttemptsRemaining: hasAttempts,
+      reconnect,
+    };
+    adapter.bluetoothConnections = new Map([["TEST0001", false]]);
+    adapter.bluetoothReconnectDelay = 10000;
+    adapter.bluetoothReconnectTimer = null;
+    adapter.bluetoothReconnectInFlight = false;
+    adapter.bluetoothManualScanInFlight = false;
+    adapter.updateBluetoothSearchReadiness = sinon.stub().resolves();
+
+    adapter.scheduleBluetoothReconnect();
+    await clock.tickAsync(10000);
+
+    expect(reconnect.calledOnce).to.equal(true);
+    expect(adapter.bluetoothReconnectTimer).to.equal(null);
+    adapter.scheduleBluetoothReconnect();
+    expect(adapter.bluetoothReconnectTimer).to.equal(null);
   });
 });
 
@@ -1115,6 +1151,58 @@ describe("Easee polling regressions", () => {
     ]);
   });
 
+  it("repairs existing lastUpdate metadata without changing its string value", async () => {
+    const adapter = createAdapterHarness();
+    adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+    adapter.extendObjectAsync = sinon.stub().resolves();
+
+    await adapter.ensureLastUpdateObject();
+
+    expect(adapter.setObjectNotExistsAsync.firstCall.args[1].common).to.include(
+      {
+        type: "string",
+        role: "text",
+      },
+    );
+    expect(
+      adapter.extendObjectAsync.calledWithExactly("lastUpdate", {
+        common: { type: "string", role: "text" },
+      }),
+    ).to.equal(true);
+  });
+
+  it("redacts unknown SignalR payloads and failure details from logs", async () => {
+    const adapter = createAdapterHarness();
+    const testPin = "TEST-PIN-7194";
+    const testToken = "TEST-RFID-TOKEN-64af";
+
+    adapter.handleSignalRProductUpdate({
+      id: 128,
+      mid: testPin,
+      dataType: 4,
+      value: testToken,
+    });
+    adapter.setStateAsync = sinon
+      .stub()
+      .rejects(new Error(`Failed for ${testPin} and ${testToken}`));
+    adapter.handleSignalRProductUpdate({
+      id: 103,
+      mid: "charger-a",
+      dataType: 2,
+      value: true,
+    });
+    await Promise.allSettled([...adapter.observedStateWrites.values()]);
+
+    const loggedText = [
+      ...adapter.log.debug.args.flat(),
+      ...adapter.log.warn.args.flat(),
+    ].join("\\n");
+    expect(loggedText).to.contain("Unknown SignalR observation (id=128");
+    expect(loggedText).to.contain("SignalR state update failed (Error).");
+    expect(loggedText).not.to.contain(testPin);
+    expect(loggedText).not.to.contain(testToken);
+  });
+
   it("serializes SignalR updates to the same state in arrival order", async () => {
     const adapter = createAdapterHarness();
     let releaseFirstWrite: (() => void) | undefined;
@@ -1811,6 +1899,72 @@ describe("Easee polling regressions", () => {
     ).to.equal(true);
   });
 
+  it("sends only supported phase modes to Cloud settings", () => {
+    const adapter = createAdapterHarness();
+    const changeConfig = sinon.stub().resolves();
+    adapter.changeConfig = changeConfig;
+    adapter.connectionMode = "cloud";
+    const stateId = "easee.0.charger.config.phaseMode";
+
+    for (const value of [1, 2, 3]) {
+      adapter.onStateChange(stateId, { val: value, ack: false });
+    }
+    for (const value of [0, -1, 4, 1.5, "1", true, null]) {
+      adapter.onStateChange(stateId, { val: value, ack: false });
+    }
+
+    expect(changeConfig.args).to.deep.equal([
+      ["charger", "phaseMode", 1],
+      ["charger", "phaseMode", 2],
+      ["charger", "phaseMode", 3],
+    ]);
+    expect(adapter.setStateAsync.called).to.equal(false);
+    expect(adapter.log.error.callCount).to.equal(7);
+  });
+
+  it("acknowledges only supported Cloud phase modes from charger configuration", async () => {
+    const config = {
+      isEnabled: true,
+      ledStripBrightness: 50,
+      smartButtonEnabled: true,
+      wiFiSSID: "network",
+      maxChargerCurrent: 32,
+      circuitMaxCurrentP1: 16,
+      circuitMaxCurrentP2: 20,
+      circuitMaxCurrentP3: 24,
+    };
+
+    for (const phaseMode of [1, 2, 3]) {
+      const adapter = createAdapterHarness();
+      await adapter.setConfigStatus(
+        { id: "charger" },
+        { ...config, phaseMode },
+        null,
+      );
+      expect(
+        adapter.setStateAsync.calledWithExactly("charger.config.phaseMode", {
+          val: phaseMode,
+          ack: true,
+        }),
+      ).to.equal(true);
+    }
+
+    for (const phaseMode of [0, -1, 4, 1.5, "1", true, null]) {
+      const adapter = createAdapterHarness();
+      await adapter.setConfigStatus(
+        { id: "charger" },
+        { ...config, phaseMode },
+        null,
+      );
+      expect(
+        adapter.setStateAsync.calledWith(
+          "charger.config.phaseMode",
+          sinon.match({ ack: true }),
+        ),
+      ).to.equal(false);
+    }
+  });
+
   it("updates only access metadata on an existing permanent cable lock state", async () => {
     const adapter = createAdapterHarness();
     adapter.setObjectNotExistsAsync = sinon.stub().resolves();
@@ -2252,8 +2406,63 @@ describe("Easee polling regressions", () => {
       adapter.bluetoothConnectionErrors = new Map();
       adapter.bluetoothPauseRestore = new Map();
       adapter.applyBluetoothPoll = sinon.stub().resolves();
+      adapter.updateBluetoothSearchReadiness = sinon.stub().resolves();
+      adapter.bluetoothWritesInFlight = 0;
       return adapter;
     }
+
+    it("acknowledges only supported Bluetooth phase modes after matching readback", async () => {
+      for (const phaseMode of [1, 2, 3]) {
+        const adapter = createBluetoothAdapterHarness();
+        const stateId = "easee.0.EMX12345.config.phaseMode";
+        const command = sinon.stub().resolves({ id: 7, code: 1 });
+        const poll = sinon
+          .stub()
+          .resolves({ config: { phaseMode }, state: {}, values: {} });
+        adapter.bluetoothClient = { command, poll };
+
+        await adapter.handleBluetoothStateChange(stateId, {
+          val: phaseMode,
+          ack: false,
+        });
+
+        expect(
+          command.calledOnceWithExactly("EMX12345", {
+            type: "setPhaseMode",
+            mode: phaseMode,
+          }),
+        ).to.equal(true);
+        expect(
+          adapter.setStateAsync.calledWith(stateId, {
+            val: phaseMode,
+            ack: true,
+          }),
+        ).to.equal(true);
+      }
+    });
+
+    it("rejects invalid Bluetooth phase modes without sending or acknowledging them", async () => {
+      for (const phaseMode of [0, -1, 4, 1.5, "1", true, null]) {
+        const adapter = createBluetoothAdapterHarness();
+        const stateId = "easee.0.EMX12345.config.phaseMode";
+        const command = sinon.stub();
+        adapter.bluetoothClient = { command, poll: sinon.stub() };
+
+        await adapter.handleBluetoothStateChange(stateId, {
+          val: phaseMode,
+          ack: false,
+        });
+
+        expect(command.called).to.equal(false);
+        expect(
+          adapter.setStateAsync.calledWith(stateId, {
+            val: phaseMode,
+            ack: true,
+          }),
+        ).to.equal(false);
+        expect(adapter.log.error.called).to.equal(true);
+      }
+    });
 
     it("acknowledges a setting only after a positive reply and matching readback", async () => {
       const adapter = createBluetoothAdapterHarness();
@@ -2371,6 +2580,56 @@ describe("Easee polling regressions", () => {
 
   describe("Cloud control writes", () => {
     afterEach(() => sinon.restore());
+
+    it("sends whitelisted charging commands through the shared POST helper", async () => {
+      const adapter = createAdapterHarness();
+      const post = sinon.stub(axios, "post").resolves({});
+
+      await adapter.startCharging("charger");
+      await adapter.stopCharging("charger");
+      await adapter.pauseCharging("charger");
+      await adapter.resumeCharging("charger");
+      await adapter.rebootCharging("charger");
+
+      expect(
+        post.args.map(([url, body]) => [
+          new URL(String(url)).pathname.split("/").pop(),
+          body,
+        ]),
+      ).to.deep.equal([
+        ["start_charging", {}],
+        ["stop_charging", {}],
+        ["pause_charging", {}],
+        ["resume_charging", {}],
+        ["reboot", {}],
+      ]);
+      expect(
+        adapter.log.info.args.map((args: unknown[]) => args[0]),
+      ).to.deep.equal([
+        "Start charging successful",
+        "Stop charging successful",
+        "Pause charging successful",
+        "Resume charging successful",
+        "Reboot charging successful",
+      ]);
+    });
+
+    it("forwards failed command requests without converting them to success", async () => {
+      const adapter = createAdapterHarness();
+      const failure = new Error("request failed");
+      sinon.stub(axios, "post").rejects(failure);
+
+      try {
+        await adapter.pauseCharging("charger");
+        throw new Error("Expected the request to reject");
+      } catch (error) {
+        expect(error).to.equal(failure);
+      }
+      expect(adapter.log.info.called).to.equal(false);
+      expect(
+        adapter.log.error.args.map((args: unknown[]) => args[0]),
+      ).to.deep.equal(["Pause charging error", "request failed"]);
+    });
 
     it("does not execute acknowledged button state updates", () => {
       const adapter = createAdapterHarness();
@@ -2523,8 +2782,16 @@ describe("Easee polling regressions", () => {
         "charger.status.chargerOpMode",
         "charger.status.reasonForNoCurrent",
         "charger.status.totalPower",
+        "charger.status.inCurrentT2",
         "charger.status.inCurrentT3",
+        "charger.status.inCurrentT4",
+        "charger.status.inCurrentT5",
         "charger.status.inVoltageT2T3",
+        "charger.status.inVoltageT2T4",
+        "charger.status.inVoltageT2T5",
+        "charger.status.inVoltageT3T4",
+        "charger.status.inVoltageT3T5",
+        "charger.status.inVoltageT4T5",
         "charger.status.voltage",
         "charger.status.ledMode",
         "charger.status.lifetimeEnergy",
@@ -2533,7 +2800,11 @@ describe("Easee polling regressions", () => {
         "charger.config.maxChargerCurrent",
         "charger.config.dynamicChargerCurrent",
         "charger.config.dynamicCircuitCurrentP1",
+        "charger.config.dynamicCircuitCurrentP2",
+        "charger.config.dynamicCircuitCurrentP3",
         "charger.config.circuitMaxCurrentP1",
+        "charger.config.circuitMaxCurrentP2",
+        "charger.config.circuitMaxCurrentP3",
         "charger.config.ledStripBrightness",
         "charger.config.lockCablePermanently",
         "charger.config.wiFiSSID",
@@ -2573,6 +2844,18 @@ describe("Easee polling regressions", () => {
           common: { read: true, write: false },
         }),
       ).to.equal(true);
+      expect(
+        adapter.extendObjectAsync.calledWith(
+          "charger.config.ledStripBrightness",
+          { common: { role: "level.dimmer", unit: "%", min: 0, max: 100 } },
+        ),
+      ).to.equal(true);
+      expect(
+        adapter.extendObjectAsync.calledWith(
+          "charger.config.lockCablePermanently",
+          { common: { read: true, write: true } },
+        ),
+      ).to.equal(true);
 
       adapter.connectionMode = "cloud";
       await adapter.setAllStatusObjects({ id: "charger", name: "Charger" });
@@ -2591,6 +2874,11 @@ describe("Easee polling regressions", () => {
         objects.set(id, { type: "state" });
       }
       await adapter.reconcileModeSpecificObjects();
+      expect(
+        adapter.extendObjectAsync.calledWith("charger.status.cableLocked", {
+          common: { role: "indicator", read: true, write: false },
+        }),
+      ).to.equal(true);
 
       const cloudStates = new Set(
         [...objects.entries()]
