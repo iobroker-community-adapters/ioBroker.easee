@@ -29,6 +29,9 @@ affect Bluetooth support.
 
 ## Setup
 
+Use the Device Manager on the **Connection** tab to add, edit, and remove local
+chargers.
+
 1. Select **Bluetooth (local)** in the adapter settings.
 2. On the **Connection** tab, add each charger in the Device Manager with its ID
    or serial number and Bluetooth PIN. An optional name is only an ioBroker

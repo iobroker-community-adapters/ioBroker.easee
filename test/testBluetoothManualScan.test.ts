@@ -72,7 +72,7 @@ interface ManualScanAdapter {
   bluetoothReconnectInFlight: boolean;
   bluetoothConnections: Map<string, boolean>;
   bluetoothConnectingLogged: Set<string>;
-  bluetoothChargers: Array<{
+  configuredBluetoothChargers: Array<{
     serialNumber: string;
     pin: string;
     name: string;
@@ -181,7 +181,7 @@ function createHarness(
     bluetoothReconnectInFlight: false,
     bluetoothConnections: new Map([["EMX123456", true]]),
     bluetoothConnectingLogged: new Set(),
-    bluetoothChargers: [
+    configuredBluetoothChargers: [
       { serialNumber: "EMX123456", pin: "secret-pin", name: "Garage" },
     ],
     bluetoothConnectionErrors: new Map(),

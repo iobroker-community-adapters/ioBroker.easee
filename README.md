@@ -29,8 +29,9 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 Cloud is the default connection mode. Choose **Easee Cloud** or
 **Bluetooth (local)** in the adapter settings. Cloud mode uses your Easee
 account. Bluetooth mode connects directly to chargers configured in the
-Device Manager on the Connection tab; it does not log in to Cloud or switch to
-Cloud automatically. Enter each charger's serial number and Bluetooth PIN (not
+Device Manager on the Connection tab. Use it to add, edit, and remove local
+chargers; Bluetooth mode does not log in to Cloud or switch to Cloud
+automatically. Enter each charger's serial number and Bluetooth PIN (not
 your Easee account password), then save the settings and restart the adapter.
 An optional name is only an ioBroker label. The PIN is stored encrypted in the
 adapter configuration.
@@ -92,7 +93,7 @@ This adapter would not have been possible without the great work of @Newan (http
 - (Voodoo2man) Improved charger control reliability for current limits and commands.
 - Exposed only datapoints supported by the selected Cloud or Bluetooth connection mode and removed unsupported adapter-created datapoints after switching modes.
 - Redacted sensitive SignalR diagnostics and validated Cloud phase modes and Bluetooth timeout limits.
-- Migrated legacy Bluetooth charger settings to encrypted canonical storage and translated Device Manager actions and diagnostics in all supported locales.
+- (Voodoo2man) Simplified Bluetooth charger configuration to the Device Manager.
 - (Voodoo2man) Fixed persistence when editing, removing, or clearing Bluetooth charger configurations.
 - Consolidated charger state metadata, fixed `lastUpdate` metadata, and removed unused helpers and obsolete translation keys.
 - Updated the D-Bus runtime dependency to a compatible maintained fork and resolved reported production audit findings.

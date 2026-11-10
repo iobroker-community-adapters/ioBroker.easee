@@ -164,32 +164,10 @@
   },
   "protectedNative": [
     "client_secret",
-    "bluetoothChargers",
-    "bluetoothChargerList",
-    "bluetoothCharger1Pin",
-    "bluetoothCharger2Pin",
-    "bluetoothCharger3Pin",
-    "bluetoothCharger4Pin",
-    "bluetoothCharger5Pin",
-    "bluetoothCharger6Pin",
-    "bluetoothCharger7Pin",
-    "bluetoothCharger8Pin",
-    "bluetoothCharger9Pin",
-    "bluetoothCharger10Pin"
+    "bluetoothChargerList"
   ],
   "encryptedNative": [
-    "client_secret",
-    "bluetoothChargers",
-    "bluetoothCharger1Pin",
-    "bluetoothCharger2Pin",
-    "bluetoothCharger3Pin",
-    "bluetoothCharger4Pin",
-    "bluetoothCharger5Pin",
-    "bluetoothCharger6Pin",
-    "bluetoothCharger7Pin",
-    "bluetoothCharger8Pin",
-    "bluetoothCharger9Pin",
-    "bluetoothCharger10Pin"
+    "client_secret"
   ],
   "native": {
     "connectionMode": "cloud",
@@ -201,8 +179,7 @@
     "sessionPollInterval": 60,
     "signalR": false,
     "logtype": false,
-    "bluetoothChargerList": [],
-    "bluetoothChargerListManaged": false
+    "bluetoothChargerList": []
   },
   "objects": [],
   "instanceObjects": [

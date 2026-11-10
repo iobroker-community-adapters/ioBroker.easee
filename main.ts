@@ -449,23 +449,6 @@ function parseBluetoothChargersAllowEmpty(
   return value.length === 0 ? [] : parseBluetoothChargers(value);
 }
 
-function getLegacyBluetoothNativeReset(): Record<string, unknown> {
-  const native: Record<string, unknown> = { bluetoothChargers: "" };
-  for (let index = 1; index <= 10; index++) {
-    native[`bluetoothCharger${index}SerialNumber`] = "";
-    native[`bluetoothCharger${index}Pin`] = "";
-    native[`bluetoothCharger${index}Name`] = "";
-  }
-  return native;
-}
-
-function hasLegacyBluetoothSettings(native: Record<string, unknown>): boolean {
-  return Object.keys(getLegacyBluetoothNativeReset()).some((key) => {
-    const value = native[key];
-    return typeof value === "string" && value.trim() !== "";
-  });
-}
-
 function isRetryableError(error: unknown): error is RetryableError {
   return (
     error instanceof Error && (error as RetryableError).retryDeferred === true
@@ -542,7 +525,7 @@ class Easee extends Adapter {
   bluetoothAdapterStateWrite: Promise<void> = Promise.resolve();
   bluetoothSearchReadinessWrite: Promise<void> = Promise.resolve();
   private lastBluetoothAdapterState: BluetoothAdapterState | null = null;
-  bluetoothChargers: BluetoothChargerConfig[] = [];
+  configuredBluetoothChargers: BluetoothChargerConfig[] = [];
   bluetoothManualScanInFlight = false;
   bluetoothManualScanTask: Promise<readonly BluetoothCandidate[]> | null = null;
   bluetoothManualScanGeneration = 0;
@@ -676,24 +659,10 @@ class Easee extends Adapter {
   async resetBluetoothChargerConfiguration(): Promise<void> {
     const mutation = this.bluetoothConfigMutation.then(async () => {
       const persisted = await this.getBluetoothInstanceObject();
-      const native: Record<string, unknown> = {
-        bluetoothChargerList: [],
-        bluetoothChargerListManaged: true,
-      };
-      const expected = { ...native };
-      const savedNative = await this.updateBluetoothNativeConfiguration(
-        native,
-        expected,
-        persisted,
-      );
-      if (hasLegacyBluetoothSettings(savedNative)) {
-        const legacyReset = getLegacyBluetoothNativeReset();
-        await this.updateBluetoothNativeConfiguration(legacyReset, {
-          ...expected,
-          ...legacyReset,
-        });
-      }
-      this.bluetoothChargers = [];
+      const native = { bluetoothChargerList: [] };
+      await this.updateBluetoothNativeConfiguration(native, native, persisted);
+      this.config.bluetoothChargerList = [];
+      this.configuredBluetoothChargers = [];
     });
     this.bluetoothConfigMutation = mutation.catch(() => undefined);
     return mutation;
@@ -716,25 +685,22 @@ class Easee extends Adapter {
     native: Record<string, unknown>,
     expected: Record<string, unknown>,
     source?: Record<string, unknown> & { native: Record<string, unknown> },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<void> {
     const id = `system.adapter.${this.namespace}`;
     const current = await this.getBluetoothInstanceObject();
-    if (source) {
-      const bluetoothConfigKeys = [
-        "bluetoothChargerList",
-        "bluetoothChargerListManaged",
-        ...Object.keys(getLegacyBluetoothNativeReset()),
-      ];
-      if (
-        bluetoothConfigKeys.some(
-          (key) => !isDeepStrictEqual(source.native[key], current.native[key]),
-        )
-      ) {
-        Object.assign(this.config, current.native);
-        throw new Error(
-          "Persisted Bluetooth configuration changed while saving; retry the operation",
-        );
-      }
+    if (
+      source &&
+      !isDeepStrictEqual(
+        source.native.bluetoothChargerList,
+        current.native.bluetoothChargerList,
+      )
+    ) {
+      Object.assign(this.config, {
+        bluetoothChargerList: current.native.bluetoothChargerList,
+      });
+      throw new Error(
+        "Persisted Bluetooth configuration changed while saving; retry the operation",
+      );
     }
     const replacement = {
       ...current,
@@ -755,8 +721,9 @@ class Easee extends Adapter {
         "Persisted Bluetooth configuration did not match the saved values",
       );
     }
-    Object.assign(this.config, saved.native);
-    return saved.native;
+    Object.assign(this.config, {
+      bluetoothChargerList: saved.native.bluetoothChargerList,
+    });
   }
 
   private encryptBluetoothChargerConfiguration(
@@ -774,53 +741,6 @@ class Easee extends Adapter {
     });
   }
 
-  async migrateBluetoothConfiguration(): Promise<void> {
-    const mutation = this.bluetoothConfigMutation.then(async () => {
-      const persisted = await this.getBluetoothInstanceObject();
-      const storedConfig = persisted.native;
-      const hasLegacySettings = hasLegacyBluetoothSettings(storedConfig);
-      const configuredList = storedConfig.bluetoothChargerList;
-      const isEncryptedCanonicalList =
-        storedConfig.bluetoothChargerListManaged === true &&
-        Array.isArray(configuredList) &&
-        configuredList.every(
-          (charger) =>
-            isRecord(charger) &&
-            typeof charger.pin === "string" &&
-            charger.pin.startsWith(encryptedBluetoothPinPrefix),
-        );
-      if (isEncryptedCanonicalList && !hasLegacySettings) {
-        return;
-      }
-
-      const chargers = this.getConfiguredBluetoothChargers(storedConfig);
-      if (!hasLegacySettings && chargers.length === 0) {
-        return;
-      }
-      const canonicalList = isEncryptedCanonicalList
-        ? configuredList
-        : this.encryptBluetoothChargerConfiguration(chargers);
-      const canonical = {
-        bluetoothChargerList: canonicalList,
-        bluetoothChargerListManaged: true,
-      };
-      const savedNative = await this.updateBluetoothNativeConfiguration(
-        canonical,
-        canonical,
-        persisted,
-      );
-      if (hasLegacyBluetoothSettings(savedNative)) {
-        const legacyReset = getLegacyBluetoothNativeReset();
-        await this.updateBluetoothNativeConfiguration(legacyReset, {
-          ...canonical,
-          ...legacyReset,
-        });
-      }
-    });
-    this.bluetoothConfigMutation = mutation.catch(() => undefined);
-    return mutation;
-  }
-
   private mutateBluetoothChargers(
     update: (chargers: BluetoothChargerConfig[]) => BluetoothChargerConfig[],
   ): Promise<void> {
@@ -835,20 +755,12 @@ class Easee extends Adapter {
       const canonical = {
         bluetoothChargerList:
           this.encryptBluetoothChargerConfiguration(chargers),
-        bluetoothChargerListManaged: true,
       };
-      const savedNative = await this.updateBluetoothNativeConfiguration(
+      await this.updateBluetoothNativeConfiguration(
         canonical,
         canonical,
         persisted,
       );
-      if (hasLegacyBluetoothSettings(savedNative)) {
-        const legacyReset = getLegacyBluetoothNativeReset();
-        await this.updateBluetoothNativeConfiguration(legacyReset, {
-          ...canonical,
-          ...legacyReset,
-        });
-      }
     });
     this.bluetoothConfigMutation = mutation.catch(() => undefined);
     return mutation;
@@ -1186,13 +1098,6 @@ class Easee extends Adapter {
 
   async startBluetooth(): Promise<void> {
     await this.initializeI18n();
-    try {
-      await this.migrateBluetoothConfiguration();
-    } catch {
-      this.log.warn(
-        "Bluetooth configuration migration failed; the original settings were left unchanged.",
-      );
-    }
     this.lastBluetoothAdapterState = null;
     this.bluetoothStartupComplete = false;
     await this.setObjectNotExistsAsync("info.bluetoothAdapterState", {
@@ -1282,13 +1187,13 @@ class Easee extends Adapter {
 
     let configurationError: BluetoothConfigurationError | null = null;
     try {
-      this.bluetoothChargers = this.getConfiguredBluetoothChargers();
+      this.configuredBluetoothChargers = this.getConfiguredBluetoothChargers();
     } catch (error) {
       configurationError = getStoredBluetoothConfigurationError(error);
       this.log.error(
         `Invalid Bluetooth charger configuration: ${configurationError.message}`,
       );
-      this.bluetoothChargers = [];
+      this.configuredBluetoothChargers = [];
     }
 
     if (configurationError) {
@@ -1297,11 +1202,11 @@ class Easee extends Adapter {
       );
     } else {
       this.log.info(
-        `Initializing Bluetooth transport for ${this.bluetoothChargers.length} configured charger(s).`,
+        `Initializing Bluetooth transport for ${this.configuredBluetoothChargers.length} configured charger(s).`,
       );
     }
     const devices: BluetoothDeviceConfig[] = [];
-    for (const config of this.bluetoothChargers) {
+    for (const config of this.configuredBluetoothChargers) {
       const charger: Charger = {
         id: config.serialNumber,
         name: config.name,
@@ -1318,9 +1223,9 @@ class Easee extends Adapter {
       await this.setBluetoothInfoObjects(charger);
       await this.setStateAsync(`${charger.id}.name`, charger.name, true);
     }
-    if (this.bluetoothChargers.length > 0) {
+    if (this.configuredBluetoothChargers.length > 0) {
       await this.reconcileModeSpecificObjects(
-        this.bluetoothChargers.map((charger) => charger.serialNumber),
+        this.configuredBluetoothChargers.map((charger) => charger.serialNumber),
       );
     }
 
@@ -1353,7 +1258,7 @@ class Easee extends Adapter {
       if (this.unloading) {
         return;
       }
-      if (this.bluetoothChargers.length === 0) {
+      if (this.configuredBluetoothChargers.length === 0) {
         this.bluetoothStartupComplete = true;
         if (configurationError) {
           this.log.info(
@@ -1396,7 +1301,7 @@ class Easee extends Adapter {
           "Bluetooth search failed. Check that Bluetooth is on and that ioBroker is allowed to use it. See the adapter log for details.",
         ),
       );
-      for (const charger of this.bluetoothChargers) {
+      for (const charger of this.configuredBluetoothChargers) {
         this.bluetoothConnectionErrors.set(charger.serialNumber, detail);
         await this.setStateAsync(
           `${charger.serialNumber}.info.bluetoothError`,
@@ -1898,7 +1803,7 @@ class Easee extends Adapter {
 
   private sanitizeBluetoothDiagnostic(value: string): string {
     let sanitized = value.replace(/[\r\n\t]+/g, " ");
-    for (const charger of this.bluetoothChargers) {
+    for (const charger of this.configuredBluetoothChargers) {
       if (charger.serialNumber) {
         sanitized = sanitized.split(charger.serialNumber).join("[redacted]");
       }
@@ -1914,7 +1819,7 @@ class Easee extends Adapter {
 
   private sanitizeBluetoothScanResult(value: string): string {
     let sanitized = value.replace(/[\r\n\t]+/g, " ");
-    for (const charger of this.bluetoothChargers) {
+    for (const charger of this.configuredBluetoothChargers) {
       if (charger.pin) {
         sanitized = sanitized.split(charger.pin).join("[redacted]");
       }
@@ -2086,7 +1991,7 @@ class Easee extends Adapter {
     await this.updateBluetoothSearchReadiness();
     const client = this.bluetoothClient;
     try {
-      for (const charger of this.bluetoothChargers) {
+      for (const charger of this.configuredBluetoothChargers) {
         if (
           this.unloading ||
           !this.bluetoothConnections.get(charger.serialNumber)

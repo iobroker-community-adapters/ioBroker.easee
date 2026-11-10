@@ -25,7 +25,6 @@ export type BluetoothConfigurationErrorDiagnostic =
     };
 
 type BluetoothConfigurationErrorReason =
-  | "invalid-json"
   | "not-a-list"
   | "not-settings"
   | "invalid-entry"
@@ -40,10 +39,6 @@ const errorMessages: Record<
   BluetoothConfigurationErrorReason,
   { en: string; de: string }
 > = {
-  "invalid-json": {
-    en: "must be valid JSON",
-    de: "muss gültiges JSON enthalten",
-  },
   "not-a-list": { en: "must be a list", de: "muss eine Liste sein" },
   "not-settings": {
     en: "must be an object",
@@ -166,42 +161,17 @@ interface ParseContext {
   source: BluetoothConfigurationSource;
   setting: string;
   allowEmpty?: boolean;
-  entryFields?: Array<{
-    serialNumber: string;
-    pin: string;
-    name: string;
-  }>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasConfiguredValue(value: unknown): boolean {
-  if (value === undefined || value === null || value === "") {
-    return false;
-  }
-  return typeof value !== "string" || value.trim() !== "";
-}
-
 function parseChargerEntries(
   value: unknown,
   context: ParseContext,
 ): BluetoothChargerConfig[] {
-  let entries: unknown = value;
-  if (typeof value === "string") {
-    try {
-      entries = JSON.parse(value) as unknown;
-    } catch {
-      throw configurationError(
-        context.source,
-        context.setting,
-        "invalid-json",
-        undefined,
-        context.setting,
-      );
-    }
-  }
+  const entries = value;
   if (!Array.isArray(entries)) {
     throw configurationError(
       context.source,
@@ -239,10 +209,9 @@ function parseChargerEntries(
       );
     }
 
-    const entryFields = context.entryFields?.[index];
-    const serialNumberField = entryFields?.serialNumber ?? "serialNumber";
-    const pinField = entryFields?.pin ?? "pin";
-    const nameField = entryFields?.name ?? "name";
+    const serialNumberField = "serialNumber";
+    const pinField = "pin";
+    const nameField = "name";
     const serialNumber =
       typeof item.serialNumber === "string" ? item.serialNumber.trim() : "";
     const pin = typeof item.pin === "string" ? item.pin.trim() : "";
@@ -333,59 +302,13 @@ export function parseBluetoothChargerSettings(
   }
 
   const configuredChargers = value.bluetoothChargerList;
-  if (configuredChargers !== undefined && configuredChargers !== null) {
-    if (Array.isArray(configuredChargers) && configuredChargers.length === 0) {
-      if (value.bluetoothChargerListManaged === true) {
-        return [];
-      }
-    } else {
-      return parseChargerEntries(configuredChargers, {
-        source: "stored",
-        setting: "bluetoothChargerList",
-        allowEmpty: value.bluetoothChargerListManaged === true,
-      });
-    }
-  }
-
-  const formEntries: Record<string, unknown>[] = [];
-  const entryFields: ParseContext["entryFields"] = [];
-  for (let index = 1; index <= 10; index++) {
-    const serialNumberField = `bluetoothCharger${index}SerialNumber`;
-    const pinField = `bluetoothCharger${index}Pin`;
-    const nameField = `bluetoothCharger${index}Name`;
-    const serialNumber = value[serialNumberField];
-    const pin = value[pinField];
-    const name = value[nameField];
-    if ([serialNumber, pin, name].some((field) => hasConfiguredValue(field))) {
-      formEntries.push({ serialNumber, pin, name });
-      entryFields.push({
-        serialNumber: serialNumberField,
-        pin: pinField,
-        name: nameField,
-      });
-    }
-  }
-
-  if (formEntries.length > 0) {
-    return parseChargerEntries(formEntries, {
-      source: "stored",
-      setting: "bluetoothChargerList",
-      entryFields,
-    });
-  }
-
-  const legacyChargers = value.bluetoothChargers;
-  if (
-    legacyChargers === undefined ||
-    legacyChargers === null ||
-    legacyChargers === ""
-  ) {
+  if (configuredChargers === undefined || configuredChargers === null) {
     return [];
   }
 
-  return parseChargerEntries(legacyChargers, {
+  return parseChargerEntries(configuredChargers, {
     source: "stored",
-    setting: "bluetoothChargers",
+    setting: "bluetoothChargerList",
     allowEmpty: true,
   });
 }

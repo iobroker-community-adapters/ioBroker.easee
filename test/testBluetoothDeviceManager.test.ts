@@ -109,8 +109,6 @@ function createHarness(initialConfig: Record<string, unknown> = {}): {
   adapter.namespace = "easee.0";
   adapter.config = {
     bluetoothChargerList: [],
-    bluetoothChargerListManaged: false,
-    bluetoothChargers: "",
     ...initialConfig,
   };
   adapter.bluetoothConfigMutation = Promise.resolve();
@@ -204,7 +202,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Garage",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     const devices = manager.getDevices();
     expect(manager.getInfo().apiVersion).to.equal("v3");
@@ -225,7 +222,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Garage",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
 
     const [device] = manager.getDevices();
@@ -287,11 +283,15 @@ describe("Bluetooth charger Device Manager", () => {
     expect(device.controls).to.be.undefined;
   });
 
-  it("adds a charger, encrypts its PIN, and clears migrated legacy configuration", async () => {
+  it("adds a charger and encrypts its PIN in the canonical list", async () => {
     const { adapter, manager, storedObject } = createHarness({
-      bluetoothCharger1SerialNumber: "EMX123456",
-      bluetoothCharger1Pin: "1234",
-      bluetoothCharger1Name: "Legacy garage",
+      bluetoothChargerList: [
+        {
+          serialNumber: "EMX123456",
+          pin: "easee:v1:encrypted-31323334",
+          name: "Garage",
+        },
+      ],
     });
     const context = {
       showForm: sinon.stub().resolves({
@@ -308,31 +308,26 @@ describe("Bluetooth charger Device Manager", () => {
 
     expect(await addAction.handler!(context)).to.deep.equal({ refresh: true });
     expect(adapter.encrypt.calledWithExactly("5678")).to.equal(true);
-    expect(storedObject.native.bluetoothChargerList).to.deep.equal([
+    const expected = [
       {
         serialNumber: "EMX123456",
         pin: "easee:v1:encrypted-31323334",
-        name: "Legacy garage",
+        name: "Garage",
       },
       {
         serialNumber: "EMX654321",
         pin: "easee:v1:encrypted-35363738",
         name: "New charger",
       },
-    ]);
-    expect(storedObject.native.bluetoothChargers).to.equal("");
-    expect(storedObject.native.bluetoothCharger1SerialNumber).to.equal("");
-    expect(storedObject.native.bluetoothCharger1Pin).to.equal("");
+    ];
+    expect(storedObject.native.bluetoothChargerList).to.deep.equal(expected);
+    expect(adapter.config.bluetoothChargerList).to.deep.equal(expected);
     expect(storedObject.native.untouchedSetting).to.equal("keep native");
     expect(storedObject.common.untouchedSetting).to.equal("keep common");
     expect(storedObject._id).to.equal("system.adapter.easee.0");
-    expect(adapter.config.bluetoothChargerList).to.deep.equal(
-      storedObject.native.bluetoothChargerList,
-    );
-    expect(adapter.config.bluetoothChargerListManaged).to.equal(true);
-    expect(adapter.config.bluetoothChargers).to.equal("");
     expect(adapter.extendForeignObjectAsync.called).to.equal(false);
     expect(JSON.stringify(storedObject.native)).not.to.include("5678");
+    expect(JSON.stringify(adapter.log)).not.to.include("5678");
   });
 
   it("allows adding the first charger to a new empty configuration", async () => {
@@ -367,7 +362,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Garage",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     adapter.decrypt.throws(new Error("decrypt-error-secret"));
 
@@ -391,7 +385,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Garage",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     adapter.decrypt.throws(new Error("decrypt-error-secret"));
     const context = {
@@ -419,149 +412,6 @@ describe("Bluetooth charger Device Manager", () => {
     expect(adapter.log.warn.called).to.equal(false);
   });
 
-  it("migrates legacy JSON to encrypted canonical storage idempotently", async () => {
-    const legacyJson =
-      '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
-    const { adapter, manager, storedObject } = createHarness({
-      bluetoothChargers: legacyJson,
-    });
-    expect(manager.getDevices().map(({ id }) => id)).to.deep.equal([
-      "EMX123456",
-    ]);
-    const persist = adapter.setForeignObjectAsync;
-    const setSpy = sinon
-      .stub()
-      .callsFake((id: string, object: TestStoredObject) => {
-        if (setSpy.callCount === 2) {
-          expect(storedObject.native.bluetoothChargerListManaged).to.equal(
-            true,
-          );
-          expect(storedObject.native.bluetoothChargers).to.equal(legacyJson);
-        }
-        return persist(id, object);
-      });
-    adapter.setForeignObjectAsync = setSpy;
-
-    await adapter.migrateBluetoothConfiguration();
-    expect(storedObject.native.bluetoothChargers).to.equal("");
-    expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
-    expect(storedObject.native.bluetoothChargerList).to.deep.equal([
-      {
-        serialNumber: "EMX123456",
-        pin: "easee:v1:encrypted-31323334",
-        name: "Old JSON charger",
-      },
-    ]);
-    expect(adapter.setForeignObjectAsync.calledTwice).to.equal(true);
-    expect(adapter.config.bluetoothChargerList).to.deep.equal(
-      storedObject.native.bluetoothChargerList,
-    );
-    expect(adapter.config.bluetoothChargerListManaged).to.equal(true);
-    expect(adapter.config.bluetoothChargers).to.equal("");
-    await adapter.migrateBluetoothConfiguration();
-    expect(adapter.setForeignObjectAsync.calledTwice).to.equal(true);
-    expect(
-      adapter
-        .getConfiguredBluetoothChargers()
-        .map((entry: { serialNumber: string }) => entry.serialNumber),
-    ).to.deep.equal(["EMX123456"]);
-  });
-
-  it("migrates legacy slots and clears every legacy PIN field", async () => {
-    const { adapter, storedObject } = createHarness({
-      bluetoothCharger1SerialNumber: "EMX123456",
-      bluetoothCharger1Pin: "1234",
-      bluetoothCharger1Name: "Legacy slot",
-    });
-
-    await adapter.migrateBluetoothConfiguration();
-
-    expect(storedObject.native.bluetoothChargerList).to.deep.equal([
-      {
-        serialNumber: "EMX123456",
-        pin: "easee:v1:encrypted-31323334",
-        name: "Legacy slot",
-      },
-    ]);
-    expect(storedObject.native.bluetoothCharger1SerialNumber).to.equal("");
-    expect(storedObject.native.bluetoothCharger1Pin).to.equal("");
-    expect(storedObject.native.bluetoothCharger1Name).to.equal("");
-  });
-
-  it("preserves legacy configuration when canonical migration persistence fails", async () => {
-    const legacyJson =
-      '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
-    const { adapter, storedObject } = createHarness({
-      bluetoothChargers: legacyJson,
-    });
-    const originalStoredNative = { ...storedObject.native };
-    adapter.setForeignObjectAsync.rejects(new Error("save failed"));
-
-    const migrationError = await adapter
-      .migrateBluetoothConfiguration()
-      .catch((error: unknown) => error);
-    expect(migrationError).to.be.instanceOf(Error);
-    expect(storedObject.native).to.deep.equal(originalStoredNative);
-    expect(adapter.config.bluetoothChargers).to.equal(legacyJson);
-    expect(adapter.config.bluetoothChargerListManaged).to.equal(false);
-  });
-
-  it("keeps verified canonical config and surfaces legacy cleanup failure", async () => {
-    const legacyJson =
-      '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
-    const { adapter, storedObject } = createHarness({
-      bluetoothChargers: legacyJson,
-    });
-    const persist = adapter.setForeignObjectAsync;
-    const setSpy = sinon
-      .stub()
-      .callsFake((id: string, object: TestStoredObject) => {
-        if (setSpy.callCount === 2) {
-          return Promise.reject(new Error("legacy cleanup failed"));
-        }
-        return persist(id, object);
-      });
-    adapter.setForeignObjectAsync = setSpy;
-
-    const migrationError = await adapter
-      .migrateBluetoothConfiguration()
-      .catch((error: unknown) => error);
-
-    expect(migrationError).to.be.instanceOf(Error);
-    expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
-    expect(storedObject.native.bluetoothChargerList).to.deep.equal([
-      {
-        serialNumber: "EMX123456",
-        pin: "easee:v1:encrypted-31323334",
-        name: "Old JSON charger",
-      },
-    ]);
-    expect(storedObject.native.bluetoothChargers).to.equal(legacyJson);
-    expect(adapter.config.bluetoothChargerList).to.deep.equal(
-      storedObject.native.bluetoothChargerList,
-    );
-    expect(adapter.config.bluetoothChargerListManaged).to.equal(true);
-    expect(adapter.config.bluetoothChargers).to.equal(legacyJson);
-  });
-
-  it("preserves legacy configuration when migration encryption fails", async () => {
-    const legacyJson =
-      '[{"serialNumber":"EMX123456","pin":"1234","name":"Old JSON charger"}]';
-    const { adapter, storedObject } = createHarness({
-      bluetoothChargers: legacyJson,
-    });
-    const originalStoredNative = { ...storedObject.native };
-    adapter.encrypt.throws(new Error("encryption failed"));
-
-    const migrationError = await adapter
-      .migrateBluetoothConfiguration()
-      .catch((error: unknown) => error);
-    expect(migrationError).to.be.instanceOf(Error);
-    expect(storedObject.native).to.deep.equal(originalStoredNative);
-    expect(adapter.config.bluetoothChargers).to.equal(legacyJson);
-    expect(adapter.setForeignObjectAsync.called).to.equal(false);
-  });
-
   it("edits a charger while preserving its encrypted PIN when the field is blank", async () => {
     const { adapter, manager, storedObject } = createHarness({
       bluetoothChargerList: [
@@ -571,7 +421,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Old name",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     const device = manager.getDevice("EMX123456");
     const edit = actionById(device.actions!, "editBluetoothCharger");
@@ -599,7 +448,7 @@ describe("Bluetooth charger Device Manager", () => {
     expect(adapter.config.bluetoothChargerList).to.deep.equal(expected);
   });
 
-  it("removes a charger and permits an explicitly empty managed list", async () => {
+  it("removes the last charger and saves an empty canonical list", async () => {
     const { manager, adapter, storedObject } = createHarness({
       bluetoothChargerList: [
         {
@@ -608,9 +457,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "One",
         },
       ],
-      bluetoothChargerListManaged: true,
-      bluetoothCharger2SerialNumber: "EMX654321",
-      bluetoothCharger2Pin: "8765",
     });
     const remove = actionById(
       manager.getDevice("EMX123456").actions!,
@@ -625,8 +471,6 @@ describe("Bluetooth charger Device Manager", () => {
       refresh: "instance",
     });
     expect(storedObject.native.bluetoothChargerList).to.deep.equal([]);
-    expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
-    expect(storedObject.native.bluetoothCharger2Pin).to.equal("");
     expect(adapter.getConfiguredBluetoothChargers()).to.deep.equal([]);
   });
 
@@ -649,14 +493,12 @@ describe("Bluetooth charger Device Manager", () => {
     ] as const) {
       const { adapter, storedObject } = createHarness({
         bluetoothChargerList: chargers,
-        bluetoothChargerListManaged: true,
       });
 
       await adapter.removeBluetoothCharger(serialNumber);
 
       expect(storedObject.native.bluetoothChargerList).to.deep.equal(expected);
       expect(adapter.config.bluetoothChargerList).to.deep.equal(expected);
-      expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
       expect(adapter.extendForeignObjectAsync.called).to.equal(false);
     }
   });
@@ -670,7 +512,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Old name",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
 
     await adapter.editBluetoothCharger("EMX123456", {
@@ -691,7 +532,7 @@ describe("Bluetooth charger Device Manager", () => {
     expect(adapter.encrypt.calledWithExactly("9876")).to.equal(true);
   });
 
-  it("clears canonical and legacy PIN fields on reset", async () => {
+  it("clears every encrypted PIN entry on reset", async () => {
     const { adapter, storedObject } = createHarness({
       bluetoothChargerList: [
         {
@@ -699,24 +540,21 @@ describe("Bluetooth charger Device Manager", () => {
           pin: "easee:v1:encrypted-31323334",
           name: "Garage",
         },
+        {
+          serialNumber: "EMX654321",
+          pin: "easee:v1:encrypted-35363738",
+          name: "Driveway",
+        },
       ],
-      bluetoothChargerListManaged: true,
-      bluetoothChargers: '[{"serialNumber":"EMX654321","pin":"5678"}]',
-      bluetoothCharger1SerialNumber: "EMX654321",
-      bluetoothCharger1Pin: "5678",
-      bluetoothCharger1Name: "Legacy",
     });
 
     await adapter.resetBluetoothChargerConfiguration();
 
     expect(storedObject.native.bluetoothChargerList).to.deep.equal([]);
-    expect(storedObject.native.bluetoothChargerListManaged).to.equal(true);
-    expect(storedObject.native.bluetoothChargers).to.equal("");
-    expect(storedObject.native.bluetoothCharger1Pin).to.equal("");
     expect(adapter.config.bluetoothChargerList).to.deep.equal([]);
-    expect(adapter.config.bluetoothChargerListManaged).to.equal(true);
-    expect(adapter.config.bluetoothChargers).to.equal("");
-    expect(adapter.config.bluetoothCharger1Pin).to.equal("");
+    expect(adapter.configuredBluetoothChargers).to.deep.equal([]);
+    expect(JSON.stringify(storedObject.native)).not.to.include("1234");
+    expect(JSON.stringify(storedObject.native)).not.to.include("5678");
   });
 
   it("loads canonical encrypted values again from the persisted instance", () => {
@@ -728,7 +566,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Garage",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     const reloaded = createHarness(first.storedObject.native);
 
@@ -746,7 +583,6 @@ describe("Bluetooth charger Device Manager", () => {
         name: "Persisted charger",
       },
     ];
-    storedObject.native.bluetoothChargerListManaged = true;
 
     await adapter.addBluetoothCharger({
       serialNumber: "EMX654321",
@@ -768,6 +604,38 @@ describe("Bluetooth charger Device Manager", () => {
     ];
     expect(storedObject.native.bluetoothChargerList).to.deep.equal(expected);
     expect(adapter.config.bluetoothChargerList).to.deep.equal(expected);
+  });
+
+  it("synchronizes only the verified Bluetooth list into runtime configuration", async () => {
+    const { adapter, storedObject } = createHarness({
+      client_secret: "runtime-decrypted-cloud-secret",
+      runtimeOnlySetting: "keep runtime config",
+    });
+    adapter.config.client_secret = "runtime-decrypted-cloud-secret";
+    storedObject.native.client_secret = "persisted-encrypted-cloud-secret";
+    storedObject.native.persistedOnlySetting = "keep persisted native";
+
+    await adapter.addBluetoothCharger({
+      serialNumber: "EMX123456",
+      pin: "1234",
+      name: "New charger",
+    });
+
+    expect(adapter.config.client_secret).to.equal(
+      "runtime-decrypted-cloud-secret",
+    );
+    expect(adapter.config.runtimeOnlySetting).to.equal("keep runtime config");
+    expect(adapter.config).not.to.have.property("persistedOnlySetting");
+    expect(storedObject.native.client_secret).to.equal(
+      "persisted-encrypted-cloud-secret",
+    );
+    expect(storedObject.native.persistedOnlySetting).to.equal(
+      "keep persisted native",
+    );
+    expect(JSON.stringify(adapter.log)).not.to.include("1234");
+    expect(JSON.stringify(adapter.log)).not.to.include(
+      "persisted-encrypted-cloud-secret",
+    );
   });
 
   it("preserves non-Bluetooth fields changed before a configuration write", async () => {
@@ -802,7 +670,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Original",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     const originalGet = adapter.getForeignObjectAsync;
     const externalList = [
@@ -868,40 +735,6 @@ describe("Bluetooth charger Device Manager", () => {
     expect(storedObject.native.bluetoothChargerList).to.deep.equal(expected);
     expect(adapter.config.bluetoothChargerList).to.deep.equal(expected);
     expect(adapter.setForeignObjectAsync.callCount).to.equal(2);
-  });
-
-  it("serializes legacy migration before a queued charger mutation", async () => {
-    const legacyJson =
-      '[{"serialNumber":"EMX123456","pin":"1234","name":"Legacy"}]';
-    const { adapter, storedObject } = createHarness({
-      bluetoothChargers: legacyJson,
-    });
-
-    await Promise.all([
-      adapter.migrateBluetoothConfiguration(),
-      adapter.addBluetoothCharger({
-        serialNumber: "EMX654321",
-        pin: "5678",
-        name: "Added",
-      }),
-    ]);
-
-    const expected = [
-      {
-        serialNumber: "EMX123456",
-        pin: "easee:v1:encrypted-31323334",
-        name: "Legacy",
-      },
-      {
-        serialNumber: "EMX654321",
-        pin: "easee:v1:encrypted-35363738",
-        name: "Added",
-      },
-    ];
-    expect(storedObject.native.bluetoothChargerList).to.deep.equal(expected);
-    expect(storedObject.native.bluetoothChargers).to.equal("");
-    expect(adapter.config.bluetoothChargerList).to.deep.equal(expected);
-    expect(adapter.config.bluetoothChargers).to.equal("");
   });
 
   it("does not update memory when a successful write fails read-back verification", async () => {
@@ -981,7 +814,6 @@ describe("Bluetooth charger Device Manager", () => {
           name: "Garage",
         },
       ],
-      bluetoothChargerListManaged: true,
     });
     const remove = actionById(
       manager.getDevice("EMX123456").actions!,

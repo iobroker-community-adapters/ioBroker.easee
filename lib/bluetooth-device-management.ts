@@ -336,7 +336,7 @@ export class EaseeBluetoothDeviceManagement extends DeviceManagement<
             icon: "delete",
             title: deviceManagerText("Clear configuration"),
             confirmation: deviceManagerText(
-              "This clears all saved Bluetooth chargers, PINs, and legacy Bluetooth settings. Continue?",
+              "This clears all saved Bluetooth chargers and PINs. Continue?",
             ),
             handler: async (deviceId, actionContext) => {
               if (deviceId !== "__bluetooth-configuration-error__") {

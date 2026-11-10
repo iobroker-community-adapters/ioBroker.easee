@@ -58,34 +58,7 @@ describe("connection mode configuration", () => {
     ]);
   });
 
-  it("parses the encrypted JSON string used by the Admin configuration", () => {
-    expect(
-      parseBluetoothChargers(
-        '[{"serialNumber":"EMX123456","pin":"1234","name":"Garage"}]',
-      ),
-    ).to.deep.equal([
-      { serialNumber: "EMX123456", pin: "1234", name: "Garage" },
-    ]);
-  });
-
-  it("parses separate serial, PIN and name fields for multiple chargers", () => {
-    expect(
-      parseBluetoothChargerSettings({
-        bluetoothCharger1SerialNumber: "EMX123456",
-        bluetoothCharger1Pin: "1234",
-        bluetoothCharger1Name: "Garage",
-        bluetoothCharger2SerialNumber: "EMX654321",
-        bluetoothCharger2Pin: "5678",
-        bluetoothCharger2Name: "",
-        bluetoothChargers: "[]",
-      }),
-    ).to.deep.equal([
-      { serialNumber: "EMX123456", pin: "1234", name: "Garage" },
-      { serialNumber: "EMX654321", pin: "5678", name: "EMX654321" },
-    ]);
-  });
-
-  it("parses the managed charger list from adapter configuration", () => {
+  it("parses the canonical charger list from adapter configuration", () => {
     expect(
       parseBluetoothChargerSettings({
         bluetoothChargerList: [
@@ -99,120 +72,34 @@ describe("connection mode configuration", () => {
     ]);
   });
 
-  it("prefers the managed charger list over legacy settings", () => {
+  it("accepts an empty canonical list before the first Device Manager entry", () => {
     expect(
-      parseBluetoothChargerSettings({
-        bluetoothChargerList: [
-          { serialNumber: "EMX654321", pin: "5678", name: "New charger" },
-        ],
-        bluetoothCharger1SerialNumber: "EMX123456",
-        bluetoothCharger1Pin: "1234",
-        bluetoothChargers:
-          '[{"serialNumber":"EMX789012","pin":"9012","name":"Legacy"}]',
-      }),
-    ).to.deep.equal([
-      { serialNumber: "EMX654321", pin: "5678", name: "New charger" },
-    ]);
+      parseBluetoothChargerSettings({ bluetoothChargerList: [] }),
+    ).to.deep.equal([]);
+    expect(parseBluetoothChargerSettings({})).to.deep.equal([]);
   });
 
-  it("rejects malformed managed charger data without falling back to legacy values", () => {
+  it("rejects a serialized string instead of the canonical list", () => {
+    const storedJson = '[{"serialNumber":"SERIAL_SECRET","pin":"PIN_SECRET"}]';
     const error = captureConfigurationError(() =>
-      parseBluetoothChargerSettings({
-        bluetoothChargerList: { serialNumber: "EMX123456", pin: "1234" },
-        bluetoothChargers:
-          '[{"serialNumber":"EMX654321","pin":"5678","name":"Legacy"}]',
-      }),
+      parseBluetoothChargerSettings({ bluetoothChargerList: storedJson }),
     );
     expect(error.source).to.equal("stored");
     expect(error.message).to.contain("bluetoothChargerList");
     expect(error.message).to.contain("must be a list");
-    expect(error.diagnostic).to.deep.equal({
-      type: "validation",
-      field: "bluetoothChargerList",
-      reason: "must be a list",
-      setting: "bluetoothChargerList",
-    });
+    expect(error.message).not.to.contain("SERIAL_SECRET");
+    expect(error.message).not.to.contain("PIN_SECRET");
+    expect(error.messageDe).not.to.contain("PIN_SECRET");
   });
 
-  it("continues using existing legacy settings while the managed list is empty", () => {
-    expect(
-      parseBluetoothChargerSettings({
-        bluetoothChargerList: [],
-        bluetoothCharger1SerialNumber: "EMX123456",
-        bluetoothCharger1Pin: "1234",
-        bluetoothCharger1Name: "Existing charger",
-        bluetoothChargers: "[]",
-      }),
-    ).to.deep.equal([
-      {
-        serialNumber: "EMX123456",
-        pin: "1234",
-        name: "Existing charger",
-      },
-    ]);
-  });
-
-  it("accepts an empty managed list before the first Device Manager entry", () => {
-    expect(
-      parseBluetoothChargerSettings({
-        bluetoothChargerList: [],
-        bluetoothChargerListManaged: true,
-        bluetoothChargers: "malformed stale legacy data",
-      }),
-    ).to.deep.equal([]);
-  });
-
-  it("accepts empty or unset legacy configuration", () => {
-    expect(parseBluetoothChargerSettings({})).to.deep.equal([]);
-    expect(
-      parseBluetoothChargerSettings({ bluetoothChargers: "[]" }),
-    ).to.deep.equal([]);
-  });
-
-  it("parses a JSON-array string in the managed list setting", () => {
-    expect(
-      parseBluetoothChargerSettings({
-        bluetoothChargerList:
-          '[{"serialNumber":"EMX123456","pin":"1234","name":"Garage"}]',
-      }),
-    ).to.deep.equal([
-      { serialNumber: "EMX123456", pin: "1234", name: "Garage" },
-    ]);
-  });
-
-  it("keeps reading the encrypted legacy JSON setting when form fields are empty", () => {
-    expect(
-      parseBluetoothChargerSettings({
-        bluetoothChargerList: [],
-        bluetoothCharger1SerialNumber: "",
-        bluetoothCharger1Pin: "",
-        bluetoothChargers:
-          '[{"serialNumber":"EMX123456","pin":"1234","name":"Garage"}]',
-      }),
-    ).to.deep.equal([
-      { serialNumber: "EMX123456", pin: "1234", name: "Garage" },
-    ]);
-  });
-
-  it("rejects incomplete individual charger fields", () => {
-    expect(() =>
-      parseBluetoothChargerSettings({
-        bluetoothCharger1SerialNumber: "EMX123456",
-        bluetoothCharger1Pin: "",
-        bluetoothChargers: "[]",
-      }),
-    ).to.throw("needs a Bluetooth PIN");
-  });
-
-  it("rejects malformed JSON as input without echoing submitted values", () => {
+  it("rejects serialized input without echoing submitted values", () => {
     const submittedJson = '{"serialNumber":"SERIAL_SECRET","pin":"PIN_SECRET"';
     const error = captureConfigurationError(() =>
       parseBluetoothChargers(submittedJson),
     );
     expect(error.source).to.equal("input");
     expect(error.message).to.contain("bluetoothChargerList");
-    expect(error.message).to.contain("must be valid JSON");
-    expect(error.messageDe).to.contain("gültiges JSON");
+    expect(error.message).to.contain("must be a list");
     expect(error.message).not.to.contain(submittedJson);
     expect(error.message).not.to.contain("SERIAL_SECRET");
     expect(error.messageDe).not.to.contain("PIN_SECRET");
@@ -253,14 +140,15 @@ describe("connection mode configuration", () => {
     const encryptedPin = "encrypted-secret-pin";
     const error = captureConfigurationError(() =>
       parseBluetoothChargerSettings({
-        bluetoothCharger1SerialNumber: "EMX123456",
-        bluetoothCharger1Pin: { encrypted: encryptedPin },
+        bluetoothChargerList: [
+          { serialNumber: "EMX123456", pin: { encrypted: encryptedPin } },
+        ],
       }),
     );
     expect(error.source).to.equal("stored");
     expect(error.message).to.contain("Stored");
     expect(error.message).to.contain("entry 1");
-    expect(error.message).to.contain("bluetoothCharger1Pin");
+    expect(error.message).to.contain("pin");
     expect(error.message).not.to.contain(encryptedPin);
     expect(error.messageDe).not.to.contain(encryptedPin);
   });
@@ -269,12 +157,12 @@ describe("connection mode configuration", () => {
     const serial = "EMX_SECRET_123";
     const pin = "PIN_SECRET_123";
     const encryptedPin = "ENCRYPTED_PIN_SECRET_123";
-    const submittedJson = JSON.stringify([
+    const submittedChargers = [
       { serialNumber: serial, pin, encryptedPin, key: "key-secret" },
       { serialNumber: serial.toLowerCase(), pin: "second-pin-secret" },
-    ]);
+    ];
     const error = captureConfigurationError(() =>
-      parseBluetoothChargers(submittedJson),
+      parseBluetoothChargers(submittedChargers),
     );
     expect(error.source).to.equal("input");
     expect(error.message).to.contain("entry 2");
@@ -285,24 +173,12 @@ describe("connection mode configuration", () => {
       encryptedPin,
       "key-secret",
       "second-pin-secret",
-      submittedJson,
+      JSON.stringify(submittedChargers),
     ]) {
       expect(error.message).not.to.contain(secret);
       expect(error.messageDe).not.to.contain(secret);
       expect(error.stack).not.to.contain(secret);
     }
-  });
-
-  it("identifies malformed nonempty stored JSON without exposing its payload", () => {
-    const storedJson = '{"encryptedPin":"stored-ciphertext-secret"';
-    const error = captureConfigurationError(() =>
-      parseBluetoothChargerSettings({ bluetoothChargers: storedJson }),
-    );
-    expect(error.source).to.equal("stored");
-    expect(error.message).to.contain("bluetoothChargers");
-    expect(error.message).to.contain("must be valid JSON");
-    expect(error.message).not.to.contain(storedJson);
-    expect(error.message).not.to.contain("stored-ciphertext-secret");
   });
 
   it("rejects incomplete Bluetooth configuration", () => {

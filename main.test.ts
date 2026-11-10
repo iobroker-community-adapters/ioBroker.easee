@@ -153,7 +153,7 @@ function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
   const adapter = createAdapterHarness();
   adapter.connectionMode = "bluetooth";
   adapter.config = { bluetoothBinding: "auto" };
-  adapter.bluetoothChargers = [
+  adapter.configuredBluetoothChargers = [
     { serialNumber: "EMX12345", pin: "1234", name: "Garage charger" },
   ];
   adapter.bluetoothClient = null;
@@ -165,7 +165,7 @@ function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
   adapter.bluetoothConnectionGenerations = new Map();
   adapter.getConfiguredBluetoothChargers = sinon
     .stub()
-    .returns(adapter.bluetoothChargers);
+    .returns(adapter.configuredBluetoothChargers);
   adapter.setObjectNotExistsAsync = sinon.stub().resolves();
   adapter.setAllStatusObjects = sinon.stub().resolves();
   adapter.setAllConfigObjects = sinon.stub().resolves();
@@ -285,7 +285,6 @@ describe("Bluetooth startup shutdown races", () => {
           name: "Garage charger",
         },
       ],
-      bluetoothChargerListManaged: true,
     };
     adapter.decrypt = sinon.stub().throws(new Error(decryptError));
     adapter.getConfiguredBluetoothChargers =
@@ -313,7 +312,7 @@ describe("Bluetooth startup shutdown races", () => {
     expect(logs).not.to.include(decryptError);
     expect(logs).not.to.include("no chargers are configured");
     expect(logs).not.to.include("0 configured charger(s)");
-    expect(adapter.bluetoothChargers).to.deep.equal([]);
+    expect(adapter.configuredBluetoothChargers).to.deep.equal([]);
   });
 
   it("stops initialization when unload begins during adapter status update", async () => {
