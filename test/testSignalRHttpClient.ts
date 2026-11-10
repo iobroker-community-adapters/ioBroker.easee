@@ -4,7 +4,7 @@ export {};
 
 import { expect } from "chai";
 import { describe, it } from "mocha";
-import AxiosSignalRHttpClient from "../lib/signalr-http-client.ts";
+import AxiosSignalRHttpClient from "../src/lib/signalr-http-client.ts";
 import type { AxiosRequestConfig } from "axios";
 
 describe("Axios SignalR HTTP client", () => {

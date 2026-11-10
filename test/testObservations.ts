@@ -6,10 +6,14 @@ import { expect } from "chai";
 import { describe, it } from "mocha";
 import {
   CHARGER_STATE_OBSERVATION_IDS,
-  observationsToChargerState,
   observationsToChargerStateWithTimestamps,
-} from "../lib/observations.ts";
-import * as easeeEnums from "../lib/enum.ts";
+} from "../src/lib/observations.ts";
+import * as easeeEnums from "../src/lib/enum.ts";
+
+const observationsToChargerState = (
+  responseData: Parameters<typeof observationsToChargerStateWithTimestamps>[0],
+): ReturnType<typeof observationsToChargerStateWithTimestamps>["state"] =>
+  observationsToChargerStateWithTimestamps(responseData).state;
 
 describe("Easee charger observations", () => {
   it("maps observations to the existing charger state fields", () => {

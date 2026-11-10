@@ -42,6 +42,8 @@ const STATE_FIELDS_BY_OBSERVATION_ID: Record<
   199: "inVoltageT4T5",
 };
 
+const BOOLEAN_OBSERVATION_IDS = new Set([30, 68, 102, 103]);
+
 const SUPPLY_VOLTAGE_FIELDS = [
   "inVoltageT2T3",
   "inVoltageT1T3",
@@ -108,17 +110,6 @@ export interface ChargerObservationResult {
   state: ChargerObservationState;
   /** Easee source timestamps, indexed by state field. */
   timestamps: Partial<Record<string, number>>;
-}
-
-/**
- * Converts Easee API observations to the existing charger state fields.
- *
- * @param responseData The response from the Easee observations API.
- */
-export function observationsToChargerState(
-  responseData: ChargerObservationResponse | null | undefined,
-): ChargerObservationState {
-  return observationsToChargerStateWithTimestamps(responseData).state;
 }
 
 /**
@@ -197,7 +188,12 @@ function normalizeObservationValue(
   id: number,
   value: ioBroker.StateValue,
 ): ioBroker.StateValue | undefined {
-  return id === 30 || id === 103 ? normalizeBooleanObservation(value) : value;
+  if (BOOLEAN_OBSERVATION_IDS.has(id)) {
+    return normalizeBooleanObservation(value);
+  }
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 /**
