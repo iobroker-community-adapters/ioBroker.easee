@@ -10,17 +10,17 @@ import type { MessageBus } from "dbus-next";
 import {
   BLUETOOTH_CHARACTERISTICS,
   BLUETOOTH_SERVICE_UUID,
-} from "../lib/bluetooth-protocol.ts";
-import type { BluetoothChannel } from "../lib/bluetooth-protocol.ts";
-import type { BluetoothDiagnosticLogger } from "../lib/bluetooth-diagnostics.ts";
+} from "../src/lib/bluetooth-protocol.ts";
+import type { BluetoothChannel } from "../src/lib/bluetooth-protocol.ts";
+import type { BluetoothDiagnosticLogger } from "../src/lib/bluetooth-diagnostics.ts";
 import {
   createNobleBluetoothScanner,
   ensureNobleDbusDependency,
   NobleBluetoothScanner,
   pairBluezDevice,
   resolveNobleBinding,
-} from "../lib/noble-bluetooth-transport.ts";
-import { MAX_NODE_TIMEOUT_MS } from "../lib/timeout.ts";
+} from "../src/lib/noble-bluetooth-transport.ts";
+import { MAX_NODE_TIMEOUT_MS } from "../src/lib/timeout.ts";
 
 async function expectRejectedWithMessage(
   promise: Promise<unknown>,

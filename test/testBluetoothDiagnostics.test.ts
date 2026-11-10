@@ -7,7 +7,7 @@ import { describe, it } from "mocha";
 import {
   getBluetoothErrorCategory,
   logBluetoothDiagnostic,
-} from "../lib/bluetooth-diagnostics.ts";
+} from "../src/lib/bluetooth-diagnostics.ts";
 
 describe("Bluetooth diagnostics privacy", () => {
   it("uses fixed error categories and does not log generic error details", () => {

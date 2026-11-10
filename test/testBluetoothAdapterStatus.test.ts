@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import sinon from "sinon";
 import { describe, it } from "mocha";
 import type { AdapterState, Noble } from "@stoprocent/noble";
-import { NobleBluetoothScanner } from "../lib/noble-bluetooth-transport.ts";
+import { NobleBluetoothScanner } from "../src/lib/noble-bluetooth-transport.ts";
 
 function scannerWithState(state: AdapterState): NobleBluetoothScanner {
   return new NobleBluetoothScanner({ state } as Noble);

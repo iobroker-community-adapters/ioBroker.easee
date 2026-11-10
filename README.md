@@ -88,15 +88,8 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
-- (Voodoo2man) Added optional local Bluetooth connectivity as an alternative to Cloud, with per-charger setup, device discovery, and an integrated Device Manager in adapter settings.
-- (Voodoo2man) Improved Cloud status and session updates, including when site information is unavailable.
-- (Voodoo2man) Improved charger control reliability for current limits and commands.
-- Exposed only datapoints supported by the selected Cloud or Bluetooth connection mode and removed unsupported adapter-created datapoints after switching modes.
-- Redacted sensitive SignalR diagnostics and validated Cloud phase modes and Bluetooth timeout limits.
-- (Voodoo2man) Simplified Bluetooth charger configuration to the Device Manager.
-- (Voodoo2man) Fixed persistence when editing, removing, or clearing Bluetooth charger configurations.
-- Consolidated charger state metadata, fixed `lastUpdate` metadata, and removed unused helpers and obsolete translation keys.
-- Updated the D-Bus runtime dependency to a compatible maintained fork and resolved reported production audit findings.
+- (Voodoo2man) Added optional local Bluetooth connectivity alongside Cloud, with charger discovery and setup through the Device Manager.
+- (Voodoo2man) Improved Cloud status and session updates, charger controls, and Bluetooth charger configuration saving.
 
 ### 3.2.0 (2026-11-07)
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.

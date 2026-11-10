@@ -56,7 +56,7 @@ moduleLoader._load = function (
   return loaded;
 };
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const createAdapter = require("./main.ts");
+const createAdapter = require("./src/main.ts");
 moduleLoader._load = originalLoad;
 
 function createAdapterHarness(): ReturnType<typeof createAdapter> {

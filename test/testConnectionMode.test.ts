@@ -9,7 +9,7 @@ import {
   getConnectionMode,
   parseBluetoothChargerSettings,
   parseBluetoothChargers,
-} from "../lib/connection-mode.ts";
+} from "../src/lib/connection-mode.ts";
 
 function captureConfigurationError(
   action: () => unknown,

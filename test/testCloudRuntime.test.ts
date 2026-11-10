@@ -79,7 +79,7 @@ moduleLoader._load = function (
   return originalLoad.call(this, request, parent, isMain);
 };
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const createAdapter = require("../main.ts") as AdapterFactory;
+const createAdapter = require("../src/main.ts") as AdapterFactory;
 moduleLoader._load = originalLoad;
 
 function createHarness(): CloudRuntimeAdapter {

@@ -5,16 +5,16 @@ export {};
 import { expect } from "chai";
 import { describe, it } from "mocha";
 import { createDecipheriv } from "node:crypto";
-import { BluetoothHandshake } from "../lib/bluetooth-protocol.ts";
-import { BluetoothClient } from "../lib/bluetooth-client.ts";
-import type { BluetoothStatusEvent } from "../lib/bluetooth-client.ts";
-import { MAX_NODE_TIMEOUT_MS } from "../lib/timeout.ts";
+import { BluetoothHandshake } from "../src/lib/bluetooth-protocol.ts";
+import { BluetoothClient } from "../src/lib/bluetooth-client.ts";
+import type { BluetoothStatusEvent } from "../src/lib/bluetooth-client.ts";
+import { MAX_NODE_TIMEOUT_MS } from "../src/lib/timeout.ts";
 import type {
   BluetoothCandidate,
   BluetoothDiscoveryOptions,
   BluetoothLink,
   BluetoothScanner,
-} from "../lib/bluetooth-transport.ts";
+} from "../src/lib/bluetooth-transport.ts";
 
 async function expectRejectedWithMessage(
   promise: Promise<unknown>,

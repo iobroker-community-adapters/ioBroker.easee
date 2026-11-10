@@ -4,7 +4,7 @@ export {};
 
 import { expect } from "chai";
 import { describe, it } from "mocha";
-import { MAX_NODE_TIMEOUT_MS, validateTimeoutMs } from "../lib/timeout.ts";
+import { MAX_NODE_TIMEOUT_MS, validateTimeoutMs } from "../src/lib/timeout.ts";
 
 describe("Node timeout validation", () => {
   it("accepts finite positive values through the Node timer maximum", () => {

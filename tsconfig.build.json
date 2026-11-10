@@ -3,13 +3,13 @@
     "compilerOptions": {
         "noEmit": false,
         "noEmitOnError": true,
-        "rootDir": ".",
+        "rootDir": "./src",
         "outDir": "./build",
         "rewriteRelativeImportExtensions": true
     },
     "include": [
-        "main.ts",
-        "lib/**/*.ts"
+        "src/main.ts",
+        "src/lib/**/*.ts"
     ],
     "exclude": [
         "**/build",

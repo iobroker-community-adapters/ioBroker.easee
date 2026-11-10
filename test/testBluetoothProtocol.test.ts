@@ -17,7 +17,7 @@ import {
   encodeBluetoothCommand,
   parseBluetoothCommandReply,
   parseBluetoothFrame,
-} from "../lib/bluetooth-protocol.ts";
+} from "../src/lib/bluetooth-protocol.ts";
 
 function varint(value: bigint): Buffer {
   const bytes: number[] = [];

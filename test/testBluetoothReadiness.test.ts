@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { describe, it } from "mocha";
-import { deriveBluetoothSearchReadiness } from "../lib/bluetooth-readiness.ts";
-import type { BluetoothSearchReadinessInput } from "../lib/bluetooth-readiness.ts";
+import { deriveBluetoothSearchReadiness } from "../src/lib/bluetooth-readiness.ts";
+import type { BluetoothSearchReadinessInput } from "../src/lib/bluetooth-readiness.ts";
 
 const readyInput: BluetoothSearchReadinessInput = {
   unloading: false,

@@ -8,14 +8,14 @@ import sinon from "sinon";
 import Module from "node:module";
 import type { Module as NodeModule } from "node:module";
 import { afterEach, describe, it } from "mocha";
-import type { BluetoothStatusEvent } from "../lib/bluetooth-client.ts";
+import type { BluetoothStatusEvent } from "../src/lib/bluetooth-client.ts";
 import type {
   BluetoothAdapterState,
   BluetoothAdapterStatusProvider,
   BluetoothCandidate,
   BluetoothDiscoveryOptions,
   BluetoothScanner,
-} from "../lib/bluetooth-transport.ts";
+} from "../src/lib/bluetooth-transport.ts";
 
 interface ModuleLoader {
   _load: (
@@ -137,7 +137,7 @@ moduleLoader._load = function (
   return originalLoad.call(this, request, parent, isMain);
 };
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const createAdapter = require("../main.ts");
+const createAdapter = require("../src/main.ts");
 moduleLoader._load = originalLoad;
 
 function createHarness(

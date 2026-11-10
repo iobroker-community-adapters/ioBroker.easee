@@ -57,7 +57,7 @@ moduleLoader._load = function (
   return originalLoad.call(this, request, parent, isMain);
 };
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const createAdapter = require("../main.ts");
+const createAdapter = require("../src/main.ts");
 moduleLoader._load = originalLoad;
 
 const BluetoothDeviceManager = createAdapter.EaseeBluetoothDeviceManagement;

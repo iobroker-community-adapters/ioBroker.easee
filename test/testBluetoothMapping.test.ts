@@ -4,8 +4,8 @@ export {};
 
 import { expect } from "chai";
 import { describe, it } from "mocha";
-import { mapBluetoothPoll } from "../lib/bluetooth-mapping.ts";
-import type { BluetoothPollResult } from "../lib/bluetooth-client.ts";
+import { mapBluetoothPoll } from "../src/lib/bluetooth-mapping.ts";
+import type { BluetoothPollResult } from "../src/lib/bluetooth-client.ts";
 
 describe("Bluetooth datapoint mapping", () => {
   it("maps only matching BLE values and keeps units and phase labels", () => {

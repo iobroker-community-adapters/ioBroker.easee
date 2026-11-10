@@ -4,7 +4,7 @@ export {};
 
 import { expect } from "chai";
 import { describe, it } from "mocha";
-import { applyNobleHciMtuWorkaround } from "../lib/noble-hci-mtu-workaround.ts";
+import { applyNobleHciMtuWorkaround } from "../src/lib/noble-hci-mtu-workaround.ts";
 
 type FakeCommand = {
   buffer: Buffer;
