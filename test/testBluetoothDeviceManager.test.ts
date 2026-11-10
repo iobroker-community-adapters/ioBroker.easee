@@ -242,6 +242,7 @@ describe("Bluetooth charger Device Manager", () => {
             oid: "easee.0.EMX123456.status.totalPower",
             foreign: true,
             control: "text",
+            digits: 2,
             label: {
               en: "Charging power",
               de: "Ladeleistung",

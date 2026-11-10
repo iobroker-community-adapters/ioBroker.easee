@@ -408,6 +408,7 @@ export class EaseeBluetoothDeviceManagement extends DeviceManagement<
               oid: `${this.adapter.namespace}.${serialNumber}.status.totalPower`,
               foreign: true,
               control: "text",
+              digits: 2,
               label: {
                 en: "Charging power",
                 de: "Ladeleistung",
