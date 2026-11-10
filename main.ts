@@ -1,6 +1,7 @@
 "use strict";
 
 import { Adapter, I18n } from "@iobroker/adapter-core";
+import { isDeepStrictEqual } from "node:util";
 import {
   EaseeBluetoothDeviceManagement,
   getAdminDirectory,
@@ -458,6 +459,13 @@ function getLegacyBluetoothNativeReset(): Record<string, unknown> {
   return native;
 }
 
+function hasLegacyBluetoothSettings(native: Record<string, unknown>): boolean {
+  return Object.keys(getLegacyBluetoothNativeReset()).some((key) => {
+    const value = native[key];
+    return typeof value === "string" && value.trim() !== "";
+  });
+}
+
 function isRetryableError(error: unknown): error is RetryableError {
   return (
     error instanceof Error && (error as RetryableError).retryDeferred === true
@@ -573,10 +581,12 @@ class Easee extends Adapter {
     this.bluetoothDeviceManagement = new EaseeBluetoothDeviceManagement(this);
   }
 
-  getConfiguredBluetoothChargers(): BluetoothChargerConfig[] {
+  getConfiguredBluetoothChargers(
+    configuration: Record<string, unknown> = this.config,
+  ): BluetoothChargerConfig[] {
     let chargers: BluetoothChargerConfig[];
     try {
-      chargers = parseBluetoothChargerSettings(this.config);
+      chargers = parseBluetoothChargerSettings(configuration);
     } catch (error) {
       throw getStoredBluetoothConfigurationError(error);
     }
@@ -665,25 +675,88 @@ class Easee extends Adapter {
 
   async resetBluetoothChargerConfiguration(): Promise<void> {
     const mutation = this.bluetoothConfigMutation.then(async () => {
+      const persisted = await this.getBluetoothInstanceObject();
       const native: Record<string, unknown> = {
-        ...getLegacyBluetoothNativeReset(),
         bluetoothChargerList: [],
         bluetoothChargerListManaged: true,
       };
-      await this.updateBluetoothNativeConfiguration(native);
-      Object.assign(this.config, native);
+      const expected = { ...native };
+      const savedNative = await this.updateBluetoothNativeConfiguration(
+        native,
+        expected,
+        persisted,
+      );
+      if (hasLegacyBluetoothSettings(savedNative)) {
+        const legacyReset = getLegacyBluetoothNativeReset();
+        await this.updateBluetoothNativeConfiguration(legacyReset, {
+          ...expected,
+          ...legacyReset,
+        });
+      }
       this.bluetoothChargers = [];
     });
     this.bluetoothConfigMutation = mutation.catch(() => undefined);
     return mutation;
   }
 
+  private async getBluetoothInstanceObject(): Promise<
+    Record<string, unknown> & { native: Record<string, unknown> }
+  > {
+    const id = `system.adapter.${this.namespace}`;
+    const object = await this.getForeignObjectAsync(id);
+    if (!isRecord(object) || !isRecord(object.native)) {
+      throw new Error(
+        "Could not read persisted Bluetooth adapter configuration",
+      );
+    }
+    return object;
+  }
+
   private async updateBluetoothNativeConfiguration(
     native: Record<string, unknown>,
-  ): Promise<void> {
-    await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, {
-      native,
-    });
+    expected: Record<string, unknown>,
+    source?: Record<string, unknown> & { native: Record<string, unknown> },
+  ): Promise<Record<string, unknown>> {
+    const id = `system.adapter.${this.namespace}`;
+    const current = await this.getBluetoothInstanceObject();
+    if (source) {
+      const bluetoothConfigKeys = [
+        "bluetoothChargerList",
+        "bluetoothChargerListManaged",
+        ...Object.keys(getLegacyBluetoothNativeReset()),
+      ];
+      if (
+        bluetoothConfigKeys.some(
+          (key) => !isDeepStrictEqual(source.native[key], current.native[key]),
+        )
+      ) {
+        Object.assign(this.config, current.native);
+        throw new Error(
+          "Persisted Bluetooth configuration changed while saving; retry the operation",
+        );
+      }
+    }
+    const replacement = {
+      ...current,
+      native: { ...current.native, ...native },
+    };
+    await this.setForeignObjectAsync(
+      id,
+      replacement as ioBroker.SettableObject,
+    );
+
+    const saved = await this.getBluetoothInstanceObject();
+    if (
+      !Object.entries(expected).every(([key, value]) =>
+        isDeepStrictEqual(saved.native[key], value),
+      )
+    ) {
+      throw new Error(
+        "Persisted Bluetooth configuration did not match the saved values",
+      );
+    }
+    Object.assign(this.config, saved.native);
+    return saved.native;
   }
 
   private encryptBluetoothChargerConfiguration(
@@ -702,55 +775,80 @@ class Easee extends Adapter {
   }
 
   async migrateBluetoothConfiguration(): Promise<void> {
-    const legacyNative = getLegacyBluetoothNativeReset();
-    const hasLegacySettings = Object.keys(legacyNative).some((key) => {
-      const value = (this.config as Record<string, unknown>)[key];
-      return typeof value === "string" && value.trim() !== "";
-    });
-    const configuredList = (this.config as Record<string, unknown>)
-      .bluetoothChargerList;
-    const isEncryptedCanonicalList =
-      this.config.bluetoothChargerListManaged === true &&
-      Array.isArray(configuredList) &&
-      configuredList.every(
-        (charger) =>
-          isRecord(charger) &&
-          typeof charger.pin === "string" &&
-          charger.pin.startsWith(encryptedBluetoothPinPrefix),
-      );
-    if (isEncryptedCanonicalList && !hasLegacySettings) {
-      return;
-    }
+    const mutation = this.bluetoothConfigMutation.then(async () => {
+      const persisted = await this.getBluetoothInstanceObject();
+      const storedConfig = persisted.native;
+      const hasLegacySettings = hasLegacyBluetoothSettings(storedConfig);
+      const configuredList = storedConfig.bluetoothChargerList;
+      const isEncryptedCanonicalList =
+        storedConfig.bluetoothChargerListManaged === true &&
+        Array.isArray(configuredList) &&
+        configuredList.every(
+          (charger) =>
+            isRecord(charger) &&
+            typeof charger.pin === "string" &&
+            charger.pin.startsWith(encryptedBluetoothPinPrefix),
+        );
+      if (isEncryptedCanonicalList && !hasLegacySettings) {
+        return;
+      }
 
-    const chargers = this.getConfiguredBluetoothChargers();
-    if (!hasLegacySettings && chargers.length === 0) {
-      return;
-    }
-    const native: Record<string, unknown> = {
-      ...getLegacyBluetoothNativeReset(),
-      bluetoothChargerList: this.encryptBluetoothChargerConfiguration(chargers),
-      bluetoothChargerListManaged: true,
-    };
-    await this.updateBluetoothNativeConfiguration(native);
-    Object.assign(this.config, native);
+      const chargers = this.getConfiguredBluetoothChargers(storedConfig);
+      if (!hasLegacySettings && chargers.length === 0) {
+        return;
+      }
+      const canonicalList = isEncryptedCanonicalList
+        ? configuredList
+        : this.encryptBluetoothChargerConfiguration(chargers);
+      const canonical = {
+        bluetoothChargerList: canonicalList,
+        bluetoothChargerListManaged: true,
+      };
+      const savedNative = await this.updateBluetoothNativeConfiguration(
+        canonical,
+        canonical,
+        persisted,
+      );
+      if (hasLegacyBluetoothSettings(savedNative)) {
+        const legacyReset = getLegacyBluetoothNativeReset();
+        await this.updateBluetoothNativeConfiguration(legacyReset, {
+          ...canonical,
+          ...legacyReset,
+        });
+      }
+    });
+    this.bluetoothConfigMutation = mutation.catch(() => undefined);
+    return mutation;
   }
 
   private mutateBluetoothChargers(
     update: (chargers: BluetoothChargerConfig[]) => BluetoothChargerConfig[],
   ): Promise<void> {
     const mutation = this.bluetoothConfigMutation.then(async () => {
-      const currentChargers = this.getConfiguredBluetoothChargers();
+      const persisted = await this.getBluetoothInstanceObject();
+      const currentChargers = this.getConfiguredBluetoothChargers(
+        persisted.native,
+      );
       const chargers = parseBluetoothChargersAllowEmpty(
         update(currentChargers),
       );
-      const native: Record<string, unknown> = {
-        ...getLegacyBluetoothNativeReset(),
+      const canonical = {
         bluetoothChargerList:
           this.encryptBluetoothChargerConfiguration(chargers),
         bluetoothChargerListManaged: true,
       };
-      await this.updateBluetoothNativeConfiguration(native);
-      Object.assign(this.config, native);
+      const savedNative = await this.updateBluetoothNativeConfiguration(
+        canonical,
+        canonical,
+        persisted,
+      );
+      if (hasLegacyBluetoothSettings(savedNative)) {
+        const legacyReset = getLegacyBluetoothNativeReset();
+        await this.updateBluetoothNativeConfiguration(legacyReset, {
+          ...canonical,
+          ...legacyReset,
+        });
+      }
     });
     this.bluetoothConfigMutation = mutation.catch(() => undefined);
     return mutation;

@@ -93,6 +93,7 @@ This adapter would not have been possible without the great work of @Newan (http
 - Exposed only datapoints supported by the selected Cloud or Bluetooth connection mode and removed unsupported adapter-created datapoints after switching modes.
 - Redacted sensitive SignalR diagnostics and validated Cloud phase modes and Bluetooth timeout limits.
 - Migrated legacy Bluetooth charger settings to encrypted canonical storage and translated Device Manager actions and diagnostics in all supported locales.
+- (Voodoo2man) Fixed persistence when editing, removing, or clearing Bluetooth charger configurations.
 - Consolidated charger state metadata, fixed `lastUpdate` metadata, and removed unused helpers and obsolete translation keys.
 - Updated the D-Bus runtime dependency to a compatible maintained fork and resolved reported production audit findings.
 
