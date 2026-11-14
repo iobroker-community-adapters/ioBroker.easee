@@ -10,7 +10,8 @@
 
 [![NPM](https://nodei.co/npm/iobroker.easee.png?downloads=true)](https://nodei.co/npm/iobroker.easee/)
 
-
+> [!IMPORTANT]
+> This adapter cannot be installed from github
 
 ## easee adapter for ioBroker
 
