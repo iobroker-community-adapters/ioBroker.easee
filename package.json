@@ -28,9 +28,6 @@
     "dbus-next": "npm:@tanislav000/dbus-next@^0.10.7",
     "tough-cookie": "^6.0.2"
   },
-  "peerDependencies": {
-    "dbus-next": "^0.10.7"
-  },
   "devDependencies": {
     "@alcalzone/esbuild-register": "^2.5.1-1",
     "@alcalzone/release-script": "^5.2.1",
