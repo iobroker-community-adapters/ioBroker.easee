@@ -24,6 +24,12 @@ import type {
   BluetoothCandidate,
   BluetoothLink,
   BluetoothScanner,
+  BluetoothTimerApi,
+} from "./bluetooth-transport.ts";
+import {
+  raceWithAbortSignal,
+  raceWithTimeoutAndAbort,
+  withBluetoothTeardownTimeout,
 } from "./bluetooth-transport.ts";
 import { MAX_NODE_TIMEOUT_MS, validateTimeoutMs } from "./timeout.ts";
 
@@ -74,7 +80,34 @@ interface PendingNotification {
   readonly channel: BluetoothChannel;
   readonly resolve: (data: Buffer) => void;
   readonly reject: (error: Error) => void;
-  timer?: ReturnType<typeof setTimeout>;
+  timer?: ioBroker.Timeout;
+}
+
+interface BluetoothRun {
+  readonly signal: AbortSignal;
+  cancel(): void;
+}
+
+function createBluetoothRun(): BluetoothRun {
+  const controller = new AbortController();
+  return {
+    signal: controller.signal,
+    cancel: () => controller.abort(),
+  };
+}
+
+function withCancellation<T>(
+  promise: Promise<T>,
+  cancellation: AbortSignal | undefined,
+  message = "Bluetooth client is stopping",
+): Promise<T> {
+  return cancellation
+    ? raceWithAbortSignal(
+        promise,
+        cancellation,
+        () => new BluetoothProtocolError(message),
+      )
+    : promise;
 }
 
 interface DeviceConnection {
@@ -83,6 +116,7 @@ interface DeviceConnection {
   readonly pairingAllowed: boolean;
   readonly link: BluetoothLink;
   readonly connectedAt: number;
+  readonly cancellation: AbortSignal;
   key: Buffer;
   connected: boolean;
   closed: boolean;
@@ -130,6 +164,7 @@ export class BluetoothClient {
   private readonly setupTimeoutMs: number;
   private readonly maxCandidatesPerDevice: number;
   private readonly callbacks: BluetoothClientCallbacks;
+  private readonly timers: BluetoothTimerApi;
   private readonly diagnosticLogger?: BluetoothDiagnosticLogger;
   private readonly connections = new Map<string, DeviceConnection>();
   private readonly connectionAttempts = new Map<string, number>();
@@ -140,11 +175,13 @@ export class BluetoothClient {
   private startTask?: Promise<void>;
   private reconnectTask?: Promise<void>;
   private stopTask?: Promise<void>;
+  private run?: BluetoothRun;
 
   constructor(
     devices: readonly BluetoothDeviceConfig[],
     scanner: BluetoothScanner,
-    options: BluetoothClientOptions = {},
+    options: BluetoothClientOptions,
+    timers: BluetoothTimerApi,
   ) {
     const serials = new Set<string>();
     for (const device of devices) {
@@ -158,6 +195,7 @@ export class BluetoothClient {
     }
     this.devices = devices.map((device) => ({ ...device }));
     this.scanner = scanner;
+    this.timers = timers;
     this.discoveryTimeoutMs = validateTimeoutMs(
       options.discoveryTimeoutMs ?? 8000,
       "BLE discovery timeout",
@@ -196,7 +234,9 @@ export class BluetoothClient {
     }
     this.started = true;
     this.stopping = false;
-    this.startTask = this.connectConfiguredDevices();
+    const run = createBluetoothRun();
+    this.run = run;
+    this.startTask = this.connectConfiguredDevices(run.signal);
     return this.startTask;
   }
 
@@ -206,25 +246,48 @@ export class BluetoothClient {
     }
     this.stopping = true;
     this.started = false;
-    const scannerClose = Promise.resolve()
-      .then(() => this.scanner.close())
-      .then(
-        () => ({ error: undefined }),
-        (error: unknown) => ({ error }),
-      );
+    const run = this.run;
+    run?.cancel();
+    let scannerCloseOperation: Promise<void>;
+    try {
+      scannerCloseOperation = this.scanner.close();
+    } catch (error) {
+      scannerCloseOperation = Promise.reject(errorFrom(error));
+    }
+    const scannerClose = scannerCloseOperation.then(
+      () => ({ error: undefined }),
+      (error: unknown) => ({ error }),
+    );
+    const shutdownTasks = Promise.all([
+      this.startTask?.catch(() => undefined) ?? Promise.resolve(),
+      this.reconnectTask?.catch(() => undefined) ?? Promise.resolve(),
+      scannerClose,
+    ] as const);
     this.stopTask = (async () => {
       try {
-        await this.startTask?.catch(() => undefined);
-        await this.reconnectTask?.catch(() => undefined);
+        let shutdownError: Error | undefined;
+        let scannerCloseResult: Awaited<typeof scannerClose> | undefined;
+        try {
+          [, , scannerCloseResult] = await withBluetoothTeardownTimeout(
+            shutdownTasks,
+            "Bluetooth client shutdown",
+          );
+        } catch (error) {
+          shutdownError = errorFrom(error);
+        }
         const current = [...this.connections.values(), ...this.connecting];
         this.connections.clear();
         this.connecting.clear();
         await Promise.all(
-          current.map((connection) => this.closeConnection(connection)),
+          current.map((connection) =>
+            this.closeConnection(connection, run?.signal),
+          ),
         );
-        const { error } = await scannerClose;
-        if (error !== undefined) {
-          throw errorFrom(error);
+        if (shutdownError) {
+          throw shutdownError;
+        }
+        if (scannerCloseResult?.error !== undefined) {
+          throw errorFrom(scannerCloseResult.error);
         }
       } finally {
         for (const device of this.devices) {
@@ -232,6 +295,7 @@ export class BluetoothClient {
         }
         this.startTask = undefined;
         this.stopTask = undefined;
+        this.run = undefined;
       }
     })();
     return this.stopTask;
@@ -246,7 +310,7 @@ export class BluetoothClient {
     if (this.reconnectTask) {
       return this.reconnectTask;
     }
-    const task = this.connectConfiguredDevices().finally(() => {
+    const task = this.connectConfiguredDevices(this.run!.signal).finally(() => {
       if (this.reconnectTask === task) {
         this.reconnectTask = undefined;
       }
@@ -294,7 +358,9 @@ export class BluetoothClient {
     });
   }
 
-  private async connectConfiguredDevices(): Promise<void> {
+  private async connectConfiguredDevices(
+    cancellation: AbortSignal,
+  ): Promise<void> {
     const claimedCandidateIds = new Set(
       [...this.connections.values()].map(
         (connection) => connection.candidateId,
@@ -321,6 +387,7 @@ export class BluetoothClient {
           config,
           attempt,
           claimedCandidateIds,
+          cancellation,
         );
       } finally {
         this.attemptingDevices.delete(config.serial);
@@ -332,6 +399,7 @@ export class BluetoothClient {
     config: BluetoothDeviceConfig,
     attempt: number,
     claimedCandidateIds: Set<string>,
+    cancellation: AbortSignal,
   ): Promise<void> {
     const attemptMetadata = {
       attempt,
@@ -355,6 +423,7 @@ export class BluetoothClient {
         }),
         this.discoveryTimeoutMs + 1000,
         "Timed out scanning for BLE chargers",
+        cancellation,
       );
       logBluetoothDiagnostic(
         this.diagnosticLogger,
@@ -413,9 +482,13 @@ export class BluetoothClient {
       this.emitStatus(config, "connecting", undefined, attemptMetadata);
       let connection: DeviceConnection | undefined;
       try {
-        connection = await this.authenticateCandidate(config, candidate);
+        connection = await this.authenticateCandidate(
+          config,
+          candidate,
+          cancellation,
+        );
         if (this.stopping || !connection.connected) {
-          await this.closeConnection(connection);
+          await this.closeConnection(connection, cancellation);
           return;
         }
         claimedCandidateIds.add(candidate.id);
@@ -427,10 +500,12 @@ export class BluetoothClient {
       } catch (error) {
         if (connection) {
           this.connecting.delete(connection);
-          await this.closeConnection(connection);
+          await this.closeConnection(connection, cancellation);
         }
-        failureError = errorFrom(error);
-        this.emitStatus(config, "connecting", failureError, attemptMetadata);
+        if (!this.stopping) {
+          failureError = errorFrom(error);
+          this.emitStatus(config, "connecting", failureError, attemptMetadata);
+        }
       }
     }
     if (!connected && !this.stopping) {
@@ -452,6 +527,7 @@ export class BluetoothClient {
   private async authenticateCandidate(
     config: BluetoothDeviceConfig,
     candidate: BluetoothCandidate,
+    cancellation: AbortSignal,
   ): Promise<DeviceConnection> {
     const openingStartedAt = bluetoothDiagnosticNow();
     logBluetoothDiagnostic(
@@ -460,11 +536,14 @@ export class BluetoothClient {
       "started",
     );
     const opening = this.scanner.connect(candidate);
-    let openingTimedOut = false;
+    let openingAbandoned = false;
+    let lateLink: BluetoothLink | undefined;
     void opening.then(
-      (lateLink) => {
-        if (openingTimedOut) {
-          void lateLink.disconnect().catch(() => undefined);
+      (openedLink) => {
+        if (openingAbandoned) {
+          void openedLink.disconnect().catch(() => undefined);
+        } else {
+          lateLink = openedLink;
         }
       },
       () => undefined,
@@ -475,6 +554,7 @@ export class BluetoothClient {
         opening,
         this.setupTimeoutMs,
         "Timed out connecting to BLE charger",
+        cancellation,
       );
       logBluetoothDiagnostic(
         this.diagnosticLogger,
@@ -483,7 +563,10 @@ export class BluetoothClient {
         { durationMs: bluetoothDiagnosticNow() - openingStartedAt },
       );
     } catch (error) {
-      openingTimedOut = true;
+      openingAbandoned = true;
+      if (lateLink) {
+        void lateLink.disconnect().catch(() => undefined);
+      }
       logBluetoothDiagnostic(
         this.diagnosticLogger,
         "client.link_open",
@@ -501,6 +584,7 @@ export class BluetoothClient {
       pairingAllowed: candidate.name === config.serial,
       link,
       connectedAt: bluetoothDiagnosticNow(),
+      cancellation,
       key: Buffer.alloc(0),
       connected: true,
       closed: false,
@@ -525,6 +609,7 @@ export class BluetoothClient {
             ),
             this.setupTimeoutMs,
             "Timed out setting up BLE notifications",
+            cancellation,
           ).then(
             () =>
               logBluetoothDiagnostic(
@@ -600,7 +685,7 @@ export class BluetoothClient {
       return connection;
     } catch (error) {
       this.connecting.delete(connection);
-      await this.closeConnection(connection);
+      await this.closeConnection(connection, cancellation);
       throw error;
     }
   }
@@ -825,7 +910,7 @@ export class BluetoothClient {
         },
       );
     const exchangeStartedAt = bluetoothDiagnosticNow();
-    return Promise.all([write, trackedReply])
+    const exchange = Promise.all([write, trackedReply])
       .then(([, data]) => data)
       .catch(async (error) => {
         logBluetoothDiagnostic(
@@ -845,28 +930,26 @@ export class BluetoothClient {
         );
         this.rejectPending(connection, errorFrom(error));
         this.handleDisconnect(connection, "exchange_failure");
-        await this.closeConnection(connection);
+        await this.closeConnection(connection, connection.cancellation);
         throw errorFrom(error);
       });
+    return withCancellation(exchange, connection.cancellation);
   }
 
   private withTimeout<T>(
     promise: Promise<T>,
     timeoutMs: number,
     message: string,
+    cancellation?: AbortSignal,
   ): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new BluetoothProtocolError(message)),
-        timeoutMs,
-      );
-    });
-    return Promise.race([promise, timeout]).finally(() => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-    });
+    return raceWithTimeoutAndAbort(
+      promise,
+      timeoutMs,
+      this.timers,
+      () => new BluetoothProtocolError(message),
+      cancellation,
+      () => new BluetoothProtocolError("Bluetooth client is stopping"),
+    );
   }
 
   private waitForNotification(
@@ -892,7 +975,7 @@ export class BluetoothClient {
     if (connection.pending !== pending || pending.timer) {
       return;
     }
-    const timer = setTimeout(() => {
+    const timer = this.timers.setTimeout(() => {
       if (connection.pending === pending && pending.timer === timer) {
         connection.pending = undefined;
         pending.timer = undefined;
@@ -911,7 +994,7 @@ export class BluetoothClient {
     if (!pending?.timer) {
       return;
     }
-    clearTimeout(pending.timer);
+    this.timers.clearTimeout(pending.timer);
     pending.timer = undefined;
   }
 
@@ -967,7 +1050,7 @@ export class BluetoothClient {
     );
     connection.pending = undefined;
     if (pending.timer) {
-      clearTimeout(pending.timer);
+      this.timers.clearTimeout(pending.timer);
       pending.timer = undefined;
     }
     pending.resolve(Buffer.from(data));
@@ -1018,13 +1101,16 @@ export class BluetoothClient {
     }
     connection.pending = undefined;
     if (pending.timer) {
-      clearTimeout(pending.timer);
+      this.timers.clearTimeout(pending.timer);
       pending.timer = undefined;
     }
     pending.reject(error);
   }
 
-  private async closeConnection(connection: DeviceConnection): Promise<void> {
+  private async closeConnection(
+    connection: DeviceConnection,
+    cancellation?: AbortSignal,
+  ): Promise<void> {
     if (connection.closed) {
       return;
     }
@@ -1042,25 +1128,36 @@ export class BluetoothClient {
       "client.disconnect",
       "started",
     );
+    let disconnect: Promise<void>;
     try {
-      await Promise.resolve().then(() => connection.link.disconnect());
-      logBluetoothDiagnostic(
-        this.diagnosticLogger,
-        "client.disconnect",
-        "completed",
-        { durationMs: bluetoothDiagnosticNow() - startedAt },
-      );
+      disconnect = Promise.resolve(connection.link.disconnect());
     } catch (error) {
-      logBluetoothDiagnostic(
-        this.diagnosticLogger,
-        "client.disconnect",
-        "failed",
-        {
-          durationMs: bluetoothDiagnosticNow() - startedAt,
-          error,
-        },
-      );
+      disconnect = Promise.reject(errorFrom(error));
     }
+    const trackedDisconnect = disconnect.then(
+      () => {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "client.disconnect",
+          "completed",
+          { durationMs: bluetoothDiagnosticNow() - startedAt },
+        );
+      },
+      (error: unknown) => {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "client.disconnect",
+          "failed",
+          {
+            durationMs: bluetoothDiagnosticNow() - startedAt,
+            error,
+          },
+        );
+      },
+    );
+    await withCancellation(trackedDisconnect, cancellation).catch(
+      () => undefined,
+    );
   }
 
   private getConnection(serial: string): DeviceConnection {

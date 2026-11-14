@@ -7,7 +7,24 @@ import { EventEmitter } from "node:events";
 import sinon from "sinon";
 import { describe, it } from "mocha";
 import type { AdapterState, Noble } from "@stoprocent/noble";
-import { NobleBluetoothScanner } from "../src/lib/noble-bluetooth-transport.ts";
+import { NobleBluetoothScanner as AdapterNobleBluetoothScanner } from "../src/lib/noble-bluetooth-transport.ts";
+import type { BluetoothTimerApi } from "../src/lib/bluetooth-transport.ts";
+
+const testTimers: BluetoothTimerApi = {
+  setTimeout: (callback, timeoutMs) =>
+    setTimeout(callback, timeoutMs) as unknown as ioBroker.Timeout,
+  clearTimeout: (timer) => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  },
+};
+
+class NobleBluetoothScanner extends AdapterNobleBluetoothScanner {
+  constructor(noble: Noble) {
+    super(noble, "hci", testTimers);
+  }
+}
 
 function scannerWithState(state: AdapterState): NobleBluetoothScanner {
   return new NobleBluetoothScanner({ state } as Noble);

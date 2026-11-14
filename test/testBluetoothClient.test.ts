@@ -3,18 +3,48 @@
 export {};
 
 import { expect } from "chai";
+import sinon from "sinon";
 import { describe, it } from "mocha";
 import { createDecipheriv } from "node:crypto";
 import { BluetoothHandshake } from "../src/lib/bluetooth-protocol.ts";
-import { BluetoothClient } from "../src/lib/bluetooth-client.ts";
-import type { BluetoothStatusEvent } from "../src/lib/bluetooth-client.ts";
+import { BluetoothClient as AdapterBluetoothClient } from "../src/lib/bluetooth-client.ts";
+import type {
+  BluetoothClientOptions,
+  BluetoothDeviceConfig,
+  BluetoothStatusEvent,
+} from "../src/lib/bluetooth-client.ts";
 import { MAX_NODE_TIMEOUT_MS } from "../src/lib/timeout.ts";
+import {
+  BLUETOOTH_TEARDOWN_TIMEOUT_MS,
+  raceWithAbortSignal,
+} from "../src/lib/bluetooth-transport.ts";
 import type {
   BluetoothCandidate,
   BluetoothDiscoveryOptions,
   BluetoothLink,
   BluetoothScanner,
+  BluetoothTimerApi,
 } from "../src/lib/bluetooth-transport.ts";
+
+const testTimers: BluetoothTimerApi = {
+  setTimeout: (callback, timeoutMs) =>
+    setTimeout(callback, timeoutMs) as unknown as ioBroker.Timeout,
+  clearTimeout: (timer) => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  },
+};
+
+class BluetoothClient extends AdapterBluetoothClient {
+  constructor(
+    devices: readonly BluetoothDeviceConfig[],
+    scanner: BluetoothScanner,
+    options: BluetoothClientOptions = {},
+  ) {
+    super(devices, scanner, options, testTimers);
+  }
+}
 
 async function expectRejectedWithMessage(
   promise: Promise<unknown>,
@@ -274,6 +304,13 @@ class FakeScanner implements BluetoothScanner {
   }
 }
 
+class HangingCloseScanner extends FakeScanner {
+  override close(): Promise<void> {
+    this.closed = true;
+    return new Promise<void>(() => undefined);
+  }
+}
+
 class PendingDiscoveryScanner implements BluetoothScanner {
   closed = false;
   resolveDiscovery?: (candidates: readonly BluetoothCandidate[]) => void;
@@ -291,6 +328,34 @@ class PendingDiscoveryScanner implements BluetoothScanner {
   close(): Promise<void> {
     this.closed = true;
     this.resolveDiscovery?.([]);
+    return Promise.resolve();
+  }
+}
+
+class HangingConnectScanner extends FakeScanner {
+  readonly connectStarted: Promise<void>;
+  private resolveConnectStarted!: () => void;
+  hangOnConnect = true;
+
+  constructor(private readonly onClose: () => void) {
+    super();
+    this.connectStarted = new Promise((resolve) => {
+      this.resolveConnectStarted = resolve;
+    });
+  }
+
+  override connect(candidate: BluetoothCandidate): Promise<BluetoothLink> {
+    if (this.hangOnConnect) {
+      this.connects.push(candidate.id);
+      this.resolveConnectStarted();
+      return new Promise<BluetoothLink>(() => undefined);
+    }
+    return super.connect(candidate);
+  }
+
+  override close(): Promise<void> {
+    this.closed = true;
+    this.onClose();
     return Promise.resolve();
   }
 }
@@ -350,6 +415,53 @@ function client(
 }
 
 describe("Bluetooth client boundary", () => {
+  it("removes abort listeners after operations settle", async () => {
+    const listeners = new Set<() => void>();
+    let aborted = false;
+    const signal = {
+      get aborted(): boolean {
+        return aborted;
+      },
+      addEventListener: (_type: string, listener: () => void) =>
+        listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) =>
+        listeners.delete(listener),
+    } as unknown as AbortSignal;
+
+    for (let index = 0; index < 100; index++) {
+      expect(
+        await raceWithAbortSignal(
+          Promise.resolve(index),
+          signal,
+          () => new Error("cancelled"),
+        ),
+      ).to.equal(index);
+      expect(listeners.size).to.equal(0);
+    }
+    await expectRejectedWithMessage(
+      raceWithAbortSignal(
+        Promise.reject(new Error("operation failed")),
+        signal,
+        () => new Error("cancelled"),
+      ),
+      "operation failed",
+    );
+    expect(listeners.size).to.equal(0);
+
+    const pending = raceWithAbortSignal(
+      new Promise<void>(() => undefined),
+      signal,
+      () => new Error("cancelled"),
+    );
+    expect(listeners.size).to.equal(1);
+    aborted = true;
+    for (const listener of [...listeners]) {
+      listener();
+    }
+    await expectRejectedWithMessage(pending, "cancelled");
+    expect(listeners.size).to.equal(0);
+  });
+
   it("rejects timeout values that exceed Node timer limits", () => {
     const scanner = new FakeScanner();
     const devices = [
@@ -399,6 +511,67 @@ describe("Bluetooth client boundary", () => {
     await Promise.all([starting, stopping]);
   });
 
+  it("cancels a pending BLE connect on stop and can start again", async () => {
+    const activeTimers = new Set<ioBroker.Timeout>();
+    let scheduledTimers = 0;
+    let clearedTimers = 0;
+    const timers: BluetoothTimerApi = {
+      setTimeout: (callback, timeoutMs) => {
+        const nativeTimer = setTimeout(callback, timeoutMs);
+        const timer = nativeTimer as unknown as ioBroker.Timeout;
+        activeTimers.add(timer);
+        scheduledTimers++;
+        return timer;
+      },
+      clearTimeout: (timer) => {
+        if (timer && activeTimers.delete(timer)) {
+          clearedTimers++;
+          clearTimeout(timer);
+        }
+      },
+    };
+    const scanner = new HangingConnectScanner(() => {
+      for (const timer of [...activeTimers]) {
+        timers.clearTimeout(timer);
+      }
+    });
+    const instance = new AdapterBluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      { discoveryTimeoutMs: 20, setupTimeoutMs: 5000 },
+      timers,
+    );
+    const starting = instance.start();
+    await scanner.connectStarted;
+
+    const stopping = instance.stop();
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([starting, stopping]),
+        new Promise<never>((_resolve, reject) => {
+          watchdog = setTimeout(
+            () => reject(new Error("Bluetooth stop did not complete promptly")),
+            100,
+          );
+        }),
+      ]);
+    } finally {
+      if (watchdog) {
+        clearTimeout(watchdog);
+      }
+    }
+
+    expect(scanner.closed).to.equal(true);
+    expect(scheduledTimers).to.be.greaterThan(0);
+    expect(activeTimers.size).to.equal(0);
+    expect(clearedTimers).to.equal(scheduledTimers);
+
+    scanner.hangOnConnect = false;
+    await instance.start();
+    await instance.stop();
+  });
+
   it("uses the configured serial as the exact local-name fallback", async () => {
     const scanner = new FakeScanner();
     const instance = client(scanner);
@@ -407,6 +580,34 @@ describe("Bluetooth client boundary", () => {
 
     expect(scanner.fallbackLocalNames).to.deep.equal(["EMX12345"]);
     await instance.stop();
+  });
+
+  it("uses and clears timers provided by the adapter", async () => {
+    const scanner = new FakeScanner();
+    let scheduled = 0;
+    let cleared = 0;
+    const timers: BluetoothTimerApi = {
+      setTimeout: (callback, timeoutMs) => {
+        scheduled++;
+        return testTimers.setTimeout(callback, timeoutMs);
+      },
+      clearTimeout: (timer) => {
+        cleared++;
+        testTimers.clearTimeout(timer);
+      },
+    };
+    const instance = new AdapterBluetoothClient(
+      [{ serial: "EMX12345", pin: "1234", name: "Garage charger" }],
+      scanner,
+      {},
+      timers,
+    );
+
+    await instance.start();
+    await instance.stop();
+
+    expect(scheduled).to.be.greaterThan(0);
+    expect(cleared).to.equal(scheduled);
   });
 
   it("logs timed connection phases without identifiers or BLE payloads", async () => {
@@ -962,5 +1163,30 @@ describe("Bluetooth client boundary", () => {
       instance.command("EMX12345", { type: "reboot" }),
       "not running",
     );
+  });
+
+  it("bounds stop when the scanner close never settles", async () => {
+    const timeoutController = new AbortController();
+    const timeoutSignal = sinon
+      .stub(AbortSignal, "timeout")
+      .returns(timeoutController.signal);
+    try {
+      const scanner = new HangingCloseScanner();
+      const instance = new AdapterBluetoothClient([], scanner, {}, testTimers);
+      const stopping = instance.stop();
+      const stopped = expectRejectedWithMessage(
+        stopping,
+        "BLE teardown timed out after 5000 ms",
+      );
+      sinon.assert.calledOnceWithExactly(
+        timeoutSignal,
+        BLUETOOTH_TEARDOWN_TIMEOUT_MS,
+      );
+      timeoutController.abort();
+      await stopped;
+      expect(scanner.closed).to.equal(true);
+    } finally {
+      timeoutSignal.restore();
+    }
   });
 });
