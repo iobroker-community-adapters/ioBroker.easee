@@ -23,6 +23,7 @@ import type { BluetoothDiagnosticLogger } from "./bluetooth-diagnostics.ts";
 import {
   raceWithAbortSignal,
   raceWithTimeoutAndAbort,
+  withBluetoothTeardownTimeout,
 } from "./bluetooth-transport.ts";
 import type {
   BluetoothAdapterState,
@@ -1509,7 +1510,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       cancel();
     }
     this.closeController.abort();
-    try {
+    const closeOperation = (async (): Promise<void> => {
       this.cancelDiscovery?.();
       if (this.scanning) {
         this.scanning = false;
@@ -1532,6 +1533,12 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       this.activeLinks.clear();
       this.peripherals.clear();
       this.noble.stop();
+    })();
+    try {
+      await withBluetoothTeardownTimeout(
+        closeOperation,
+        "Noble Bluetooth scanner close",
+      );
       logBluetoothDiagnostic(
         this.diagnosticLogger,
         "transport.scanner_close",
@@ -1548,7 +1555,33 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           error,
         },
       );
-      throw error;
+      for (const link of [...this.activeLinks]) {
+        void Promise.resolve()
+          .then(() => link.disconnect())
+          .catch((disconnectError: unknown) =>
+            logBluetoothDiagnostic(
+              this.diagnosticLogger,
+              "transport.disconnect",
+              "failed",
+              { error: disconnectError },
+            ),
+          );
+      }
+      this.activeLinks.clear();
+      this.peripherals.clear();
+      try {
+        this.noble.stop();
+      } catch (stopError) {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.scanner_stop",
+          "failed",
+          { error: stopError },
+        );
+      }
+      throw error instanceof Error
+        ? error
+        : new Error("Noble Bluetooth scanner close failed");
     }
   }
 

@@ -4,6 +4,7 @@ export {};
 
 import { EventEmitter } from "node:events";
 import { expect } from "chai";
+import sinon from "sinon";
 import { describe, it } from "mocha";
 import type { Noble } from "@stoprocent/noble";
 import type { MessageBus } from "dbus-next";
@@ -13,6 +14,7 @@ import {
 } from "../src/lib/bluetooth-protocol.ts";
 import type { BluetoothChannel } from "../src/lib/bluetooth-protocol.ts";
 import type { BluetoothDiagnosticLogger } from "../src/lib/bluetooth-diagnostics.ts";
+import { BLUETOOTH_TEARDOWN_TIMEOUT_MS } from "../src/lib/bluetooth-transport.ts";
 import type { BluetoothTimerApi } from "../src/lib/bluetooth-transport.ts";
 import {
   createNobleBluetoothScanner,
@@ -184,7 +186,9 @@ class FakeNoble extends EventEmitter {
   scanning = false;
   stopped = 0;
   stopScanningCount = 0;
+  stopScanningNeverResolves = false;
   startScanDelayMs = 0;
+  onScanStart?: () => void;
   discoverOnScan: FakePeripheral[] = [];
   peripherals = new Map<string, FakePeripheral>();
 
@@ -210,6 +214,7 @@ class FakeNoble extends EventEmitter {
       );
     }
     this.scanning = true;
+    this.onScanStart?.();
     for (const peripheral of this.discoverOnScan) {
       setImmediate(() => this.emit("discover", peripheral));
     }
@@ -218,7 +223,9 @@ class FakeNoble extends EventEmitter {
   stopScanningAsync(): Promise<void> {
     this.stopScanningCount++;
     this.scanning = false;
-    return Promise.resolve();
+    return this.stopScanningNeverResolves
+      ? new Promise<void>(() => undefined)
+      : Promise.resolve();
   }
 
   async connectAsync(id: string): Promise<FakePeripheral> {
@@ -1195,6 +1202,46 @@ describe("Noble Bluetooth transport", () => {
     );
     await link.disconnect();
     await transport.close();
+  });
+
+  it("bounds scanner close when Noble scan stop never settles", async () => {
+    const noble = new FakeNoble();
+    let notifyScanStarted!: () => void;
+    const scanStarted = new Promise<void>((resolve) => {
+      notifyScanStarted = resolve;
+    });
+    noble.onScanStart = notifyScanStarted;
+    const transport = new AdapterNobleBluetoothScanner(
+      noble as unknown as Noble,
+      "hci",
+      testTimers,
+    );
+    const discovery = transport.discover(BLUETOOTH_SERVICE_UUID, 60_000);
+    void discovery.catch(() => undefined);
+    await scanStarted;
+    noble.stopScanningNeverResolves = true;
+    const timeoutController = new AbortController();
+    const timeoutSignal = sinon
+      .stub(AbortSignal, "timeout")
+      .returns(timeoutController.signal);
+
+    try {
+      const closing = transport.close();
+      const closed = expectRejectedWithMessage(
+        closing,
+        "BLE teardown timed out after 5000 ms",
+      );
+      sinon.assert.calledOnceWithExactly(
+        timeoutSignal,
+        BLUETOOTH_TEARDOWN_TIMEOUT_MS,
+      );
+      timeoutController.abort();
+      await closed;
+      expect(noble.stopScanningCount).to.be.greaterThan(0);
+      expect(noble.stopped).to.equal(1);
+    } finally {
+      timeoutSignal.restore();
+    }
   });
 
   it("clears the characteristic retry quiet window when closed", async () => {

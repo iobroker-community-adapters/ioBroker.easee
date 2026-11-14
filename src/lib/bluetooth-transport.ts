@@ -63,6 +63,8 @@ export interface BluetoothTimerApi {
   clearTimeout(timer: ioBroker.Timeout | undefined): void;
 }
 
+export const BLUETOOTH_TEARDOWN_TIMEOUT_MS = 5000;
+
 export interface BluetoothScanner {
   discover(
     serviceUuid: string,
@@ -119,6 +121,26 @@ export function raceWithAbortSignal<T>(
         ),
     );
   });
+}
+
+/**
+ * Bounds cleanup waits using an independent Node shutdown deadline.
+ *
+ * @param operation The cleanup operation to await.
+ * @param description A short cleanup stage description for the timeout error.
+ */
+export function withBluetoothTeardownTimeout<T>(
+  operation: Promise<T>,
+  description: string,
+): Promise<T> {
+  return raceWithAbortSignal(
+    operation,
+    AbortSignal.timeout(BLUETOOTH_TEARDOWN_TIMEOUT_MS),
+    () =>
+      new Error(
+        `BLE teardown timed out after ${BLUETOOTH_TEARDOWN_TIMEOUT_MS} ms: ${description}`,
+      ),
+  );
 }
 
 /**

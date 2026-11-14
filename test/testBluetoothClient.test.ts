@@ -3,6 +3,7 @@
 export {};
 
 import { expect } from "chai";
+import sinon from "sinon";
 import { describe, it } from "mocha";
 import { createDecipheriv } from "node:crypto";
 import { BluetoothHandshake } from "../src/lib/bluetooth-protocol.ts";
@@ -13,7 +14,10 @@ import type {
   BluetoothStatusEvent,
 } from "../src/lib/bluetooth-client.ts";
 import { MAX_NODE_TIMEOUT_MS } from "../src/lib/timeout.ts";
-import { raceWithAbortSignal } from "../src/lib/bluetooth-transport.ts";
+import {
+  BLUETOOTH_TEARDOWN_TIMEOUT_MS,
+  raceWithAbortSignal,
+} from "../src/lib/bluetooth-transport.ts";
 import type {
   BluetoothCandidate,
   BluetoothDiscoveryOptions,
@@ -297,6 +301,13 @@ class FakeScanner implements BluetoothScanner {
   close(): Promise<void> {
     this.closed = true;
     return Promise.resolve();
+  }
+}
+
+class HangingCloseScanner extends FakeScanner {
+  override close(): Promise<void> {
+    this.closed = true;
+    return new Promise<void>(() => undefined);
   }
 }
 
@@ -1152,5 +1163,30 @@ describe("Bluetooth client boundary", () => {
       instance.command("EMX12345", { type: "reboot" }),
       "not running",
     );
+  });
+
+  it("bounds stop when the scanner close never settles", async () => {
+    const timeoutController = new AbortController();
+    const timeoutSignal = sinon
+      .stub(AbortSignal, "timeout")
+      .returns(timeoutController.signal);
+    try {
+      const scanner = new HangingCloseScanner();
+      const instance = new AdapterBluetoothClient([], scanner, {}, testTimers);
+      const stopping = instance.stop();
+      const stopped = expectRejectedWithMessage(
+        stopping,
+        "BLE teardown timed out after 5000 ms",
+      );
+      sinon.assert.calledOnceWithExactly(
+        timeoutSignal,
+        BLUETOOTH_TEARDOWN_TIMEOUT_MS,
+      );
+      timeoutController.abort();
+      await stopped;
+      expect(scanner.closed).to.equal(true);
+    } finally {
+      timeoutSignal.restore();
+    }
   });
 });

@@ -29,6 +29,7 @@ import type {
 import {
   raceWithAbortSignal,
   raceWithTimeoutAndAbort,
+  withBluetoothTeardownTimeout,
 } from "./bluetooth-transport.ts";
 import { MAX_NODE_TIMEOUT_MS, validateTimeoutMs } from "./timeout.ts";
 
@@ -247,16 +248,33 @@ export class BluetoothClient {
     this.started = false;
     const run = this.run;
     run?.cancel();
-    const scannerClose = Promise.resolve()
-      .then(() => this.scanner.close())
-      .then(
-        () => ({ error: undefined }),
-        (error: unknown) => ({ error }),
-      );
+    let scannerCloseOperation: Promise<void>;
+    try {
+      scannerCloseOperation = this.scanner.close();
+    } catch (error) {
+      scannerCloseOperation = Promise.reject(errorFrom(error));
+    }
+    const scannerClose = scannerCloseOperation.then(
+      () => ({ error: undefined }),
+      (error: unknown) => ({ error }),
+    );
+    const shutdownTasks = Promise.all([
+      this.startTask?.catch(() => undefined) ?? Promise.resolve(),
+      this.reconnectTask?.catch(() => undefined) ?? Promise.resolve(),
+      scannerClose,
+    ] as const);
     this.stopTask = (async () => {
       try {
-        await this.startTask?.catch(() => undefined);
-        await this.reconnectTask?.catch(() => undefined);
+        let shutdownError: Error | undefined;
+        let scannerCloseResult: Awaited<typeof scannerClose> | undefined;
+        try {
+          [, , scannerCloseResult] = await withBluetoothTeardownTimeout(
+            shutdownTasks,
+            "Bluetooth client shutdown",
+          );
+        } catch (error) {
+          shutdownError = errorFrom(error);
+        }
         const current = [...this.connections.values(), ...this.connecting];
         this.connections.clear();
         this.connecting.clear();
@@ -265,9 +283,11 @@ export class BluetoothClient {
             this.closeConnection(connection, run?.signal),
           ),
         );
-        const { error } = await scannerClose;
-        if (error !== undefined) {
-          throw errorFrom(error);
+        if (shutdownError) {
+          throw shutdownError;
+        }
+        if (scannerCloseResult?.error !== undefined) {
+          throw errorFrom(scannerCloseResult.error);
         }
       } finally {
         for (const device of this.devices) {

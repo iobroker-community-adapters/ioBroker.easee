@@ -70,6 +70,12 @@ interface ManualScanAdapter {
   bluetoothCircuitWrites: Map<string, PendingCircuitWrite>;
   bluetoothCircuitWritesInFlight: number;
   bluetoothReconnectInFlight: boolean;
+  bluetoothShutdownController: AbortController;
+  bluetoothClient: {
+    command: sinon.SinonStub;
+    poll: sinon.SinonStub;
+    stop: sinon.SinonStub;
+  } | null;
   bluetoothConnections: Map<string, boolean>;
   bluetoothConnectingLogged: Set<string>;
   configuredBluetoothChargers: Array<{
@@ -94,6 +100,9 @@ interface ManualScanAdapter {
   executeVerifiedBluetoothCommand: sinon.SinonStub;
   handleBluetoothConfigWrite: sinon.SinonStub;
   reportBluetoothWriteFailure: sinon.SinonStub;
+  applyBluetoothPoll: sinon.SinonStub;
+  setTimeout: sinon.SinonStub;
+  onUnload(callback: () => void): void;
   bluetoothPollTimer: unknown;
   bluetoothReconnectTimer: unknown;
   bluetoothReconnectDelay: number;
@@ -179,6 +188,8 @@ function createHarness(
     bluetoothCircuitWrites: new Map(),
     bluetoothCircuitWritesInFlight: 0,
     bluetoothReconnectInFlight: false,
+    bluetoothShutdownController: new AbortController(),
+    bluetoothClient: null,
     bluetoothConnections: new Map([["EMX123456", true]]),
     bluetoothConnectingLogged: new Set(),
     configuredBluetoothChargers: [
@@ -188,6 +199,12 @@ function createHarness(
     bluetoothConnectionGenerations: new Map(),
     bluetoothPauseRestore: new Map(),
     bluetoothDisconnectWaiters: new Map(),
+    dynamicCircuitCurrentByCharger: new Map(),
+    dynamicCircuitCurrentByCircuit: new Map(),
+    pendingSiteConfigRetries: new Map(),
+    sessionPollTimer: null,
+    sessionAbortController: null,
+    signalRConnection: null,
     handleBluetoothConfigWrite: sinon.stub().resolves(),
     readBluetoothPoll: sinon.stub().resolves({
       state: {
@@ -198,6 +215,8 @@ function createHarness(
     }),
     executeVerifiedBluetoothCommand: sinon.stub().resolves(),
     reportBluetoothWriteFailure: sinon.stub().resolves(),
+    applyBluetoothPoll: sinon.stub().resolves(),
+    setTimeout: sinon.stub(),
     bluetoothPollTimer: null,
     bluetoothReconnectTimer: null,
     bluetoothReconnectDelay: 10000,
@@ -1084,6 +1103,97 @@ describe("manual Bluetooth search", () => {
     sinon.assert.calledOnce(adapter.reportBluetoothWriteFailure);
     sinon.assert.notCalled(adapter.handleBluetoothConfigWrite);
     expect(adapter.bluetoothWritesInFlight).to.equal(0);
+  });
+
+  it("cancels a pending BLE write retry delay during unload", async () => {
+    const { adapter, stateWrites } = createHarness();
+    const serial = "EMX123456";
+    const stateId = `easee.0.${serial}.config.isEnabled`;
+    const retryTimer = {} as ioBroker.Timeout;
+    let notifyRetryScheduled!: () => void;
+    const retryScheduled = new Promise<void>((resolve) => {
+      notifyRetryScheduled = resolve;
+    });
+    const listeners = new Set<(event: Event) => void>();
+    let aborted = false;
+    const signal = {
+      get aborted(): boolean {
+        return aborted;
+      },
+      addEventListener: (
+        _type: string,
+        listener: (event: Event) => void,
+      ): void => {
+        listeners.add(listener);
+      },
+      removeEventListener: (
+        _type: string,
+        listener: (event: Event) => void,
+      ): void => {
+        listeners.delete(listener);
+      },
+    } as unknown as AbortSignal;
+    adapter.bluetoothShutdownController = {
+      signal,
+      abort: () => {
+        aborted = true;
+        for (const listener of [...listeners]) {
+          listener(new Event("abort"));
+        }
+      },
+    };
+    const bluetoothClient = {
+      command: sinon.stub().resolves(),
+      poll: sinon.stub().resolves({ config: { isEnabled: 0 }, state: {} }),
+      stop: sinon.stub().resolves(),
+    };
+    adapter.bluetoothClient = bluetoothClient;
+    adapter.updateBluetoothSearchReadiness = () => Promise.resolve();
+    adapter.setTimeout.callsFake((_callback: () => void, timeoutMs: number) => {
+      expect(timeoutMs).to.equal(300);
+      notifyRetryScheduled();
+      return retryTimer;
+    });
+    adapter.executeVerifiedBluetoothCommand.callsFake(
+      createAdapter.Easee.prototype.executeVerifiedBluetoothCommand.bind(
+        adapter,
+      ),
+    );
+    adapter.handleBluetoothConfigWrite.callsFake(
+      createAdapter.Easee.prototype.handleBluetoothConfigWrite.bind(adapter),
+    );
+    adapter.reportBluetoothWriteFailure.callsFake(
+      createAdapter.Easee.prototype.reportBluetoothWriteFailure.bind(adapter),
+    );
+    adapter.applyBluetoothPoll.resolves();
+
+    const write = adapter.handleBluetoothStateChange(stateId, {
+      val: true,
+      ack: false,
+    });
+    await retryScheduled;
+
+    let finishUnload!: () => void;
+    const unloaded = new Promise<void>((resolve) => {
+      finishUnload = resolve;
+    });
+    adapter.onUnload(finishUnload);
+    await Promise.all([write, unloaded]);
+
+    expect(aborted).to.equal(true);
+    expect(listeners.size).to.equal(0);
+    sinon.assert.calledWith(adapter.clearTimeout, retryTimer);
+    sinon.assert.calledOnce(bluetoothClient.poll);
+    sinon.assert.calledOnce(bluetoothClient.command);
+    expect(adapter.bluetoothConnectionErrors.has(serial)).to.equal(false);
+    expect(
+      stateWrites.getCalls().some((call) => call.args[0] === stateId),
+    ).to.equal(false);
+    expect(
+      stateWrites
+        .getCalls()
+        .some((call) => call.args[0] === `${serial}.info.bluetoothError`),
+    ).to.equal(false);
   });
 
   it("blocks a manual scan until an active BLE write completes", async () => {

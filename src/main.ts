@@ -502,6 +502,7 @@ class Easee extends Adapter {
   chargerNamePending = new Map<string, number>();
   signalRSubscriptionPromises = new Map<string, Promise<void>>();
   unloading = false;
+  private readonly bluetoothShutdownController = new AbortController();
   apiRetryState = new Map<string, RetryState>();
   pendingSiteConfigRetries = new Map<string, PendingRetry>();
   dynamicCircuitCurrentByCharger = new Map<string, DynamicChargerState>();
@@ -2487,6 +2488,7 @@ class Easee extends Adapter {
     }
     await client.command(serial, command);
     for (let attempt = 0; attempt < 3; attempt++) {
+      this.assertBluetoothConnectionGeneration(serial, expectedGeneration);
       const result = await client.poll(serial);
       this.assertBluetoothConnectionGeneration(serial, expectedGeneration);
       await this.applyBluetoothPoll(serial, result);
@@ -2511,12 +2513,61 @@ class Easee extends Adapter {
         return;
       }
       if (attempt < 2) {
-        await new Promise<void>((resolve) => this.setTimeout(resolve, 300));
+        await this.waitForBluetoothWriteRetryDelay();
       }
     }
     throw new Error(
       "The charger did not confirm the requested Bluetooth setting",
     );
+  }
+
+  private waitForBluetoothWriteRetryDelay(): Promise<void> {
+    const { signal } = this.bluetoothShutdownController;
+    if (signal.aborted) {
+      return Promise.reject(new Error("Adapter is stopping"));
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: Timer;
+      let onAbort = (): void => undefined;
+      const cleanup = (): void => {
+        if (timer !== undefined) {
+          this.clearTimeout(timer);
+          timer = undefined;
+        }
+        signal.removeEventListener("abort", onAbort);
+      };
+      const finish = (callback: () => void): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        callback();
+      };
+      onAbort = () => finish(() => reject(new Error("Adapter is stopping")));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      try {
+        timer = this.setTimeout(() => finish(resolve), 300);
+        if (settled && timer !== undefined) {
+          this.clearTimeout(timer);
+          timer = undefined;
+        }
+      } catch (error) {
+        finish(() =>
+          reject(
+            error instanceof Error
+              ? error
+              : new Error("Bluetooth retry timer failed"),
+          ),
+        );
+      }
+    });
   }
 
   assertBluetoothConnectionGeneration(
@@ -2663,6 +2714,7 @@ class Easee extends Adapter {
   // Clear all Timeouts and inform users
   onUnload(callback: () => void): void {
     this.unloading = true;
+    this.bluetoothShutdownController?.abort();
     const bluetoothReadinessShutdown = this.updateBluetoothSearchReadiness();
     this.bluetoothAdapterStateUnsubscribe?.();
     this.bluetoothAdapterStateUnsubscribe = null;
