@@ -62,9 +62,10 @@ ioBroker host can use Bluetooth.
 
 On Linux, **Automatic** is the recommended connection setting. It uses
 BlueZ D-Bus and falls back to **Raw HCI** if Noble cannot resolve `dbus-next`
-and its HCI backend is available. The adapter also offers **BlueZ D-Bus** and
-**Raw HCI** explicitly for troubleshooting in the **Advanced Bluetooth
-functions** tab. Raw HCI may require
+and its HCI backend is available. Choose the binding in the adapter settings;
+`NOBLE_BINDINGS` environment overrides are not used. The adapter also offers
+**BlueZ D-Bus** and **Raw HCI** explicitly for troubleshooting in the
+**Advanced Bluetooth functions** tab. Raw HCI may require
 extra host permissions and can conflict with other Bluetooth apps or scanners;
 leave it on Automatic unless you need to troubleshoot a specific setup. Linux
 and Docker installations may need access to the host Bluetooth adapter. If an

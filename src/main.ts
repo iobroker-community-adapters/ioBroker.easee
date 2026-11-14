@@ -30,6 +30,7 @@ import type {
   BluetoothAdapterStatusProvider,
   BluetoothCandidate,
   BluetoothScanner,
+  BluetoothTimerApi,
 } from "./lib/bluetooth-transport.ts";
 import type {
   BluetoothClientOptions,
@@ -1233,10 +1234,16 @@ class Easee extends Adapter {
       const diagnosticLogger = {
         debug: (message: string) => this.log.debug(message),
       };
+      const bluetoothTimers: BluetoothTimerApi = {
+        setTimeout: (callback, timeoutMs) =>
+          this.setTimeout(callback, timeoutMs),
+        clearTimeout: (timer) => this.clearTimeout(timer),
+      };
       const scanner = await createNobleBluetoothScanner(
         undefined,
         this.config.bluetoothBinding,
         diagnosticLogger,
+        bluetoothTimers,
       );
       if (this.unloading) {
         await scanner
@@ -1277,7 +1284,12 @@ class Easee extends Adapter {
         diagnosticLogger,
         onStatus: (event) => this.handleBluetoothStatus(event),
       };
-      this.bluetoothClient = new BluetoothClient(devices, scanner, options);
+      this.bluetoothClient = new BluetoothClient(
+        devices,
+        scanner,
+        options,
+        bluetoothTimers,
+      );
       this.configurePollInterval();
       try {
         await this.bluetoothClient.start();
@@ -2499,7 +2511,7 @@ class Easee extends Adapter {
         return;
       }
       if (attempt < 2) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 300));
+        await new Promise<void>((resolve) => this.setTimeout(resolve, 300));
       }
     }
     throw new Error(

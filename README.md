@@ -89,6 +89,7 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+- (Voodoo2man) Fixed repository-checker findings and improved Bluetooth binding selection, timer cleanup, and shutdown cancellation.
 - (Voodoo2man) Limited the displayed charging power to two decimal places in the Device Manager card.
 
 ### 4.0.0 (2026-11-10)

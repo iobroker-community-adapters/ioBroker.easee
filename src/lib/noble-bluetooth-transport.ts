@@ -20,6 +20,10 @@ import {
   logBluetoothDiagnostic,
 } from "./bluetooth-diagnostics.ts";
 import type { BluetoothDiagnosticLogger } from "./bluetooth-diagnostics.ts";
+import {
+  raceWithAbortSignal,
+  raceWithTimeoutAndAbort,
+} from "./bluetooth-transport.ts";
 import type {
   BluetoothAdapterState,
   BluetoothAdapterStatusProvider,
@@ -27,6 +31,7 @@ import type {
   BluetoothDiscoveryOptions,
   BluetoothLink,
   BluetoothScanner,
+  BluetoothTimerApi,
 } from "./bluetooth-transport.ts";
 import { validateTimeoutMs } from "./timeout.ts";
 
@@ -56,27 +61,20 @@ export function ensureNobleDbusDependency(
 }
 
 /**
- * Selects a Noble binding, preferring an explicit adapter setting over environment overrides.
+ * Selects a Noble binding from the adapter setting and runtime platform.
  *
  * @param platform - Runtime platform.
- * @param configuredBinding - Adapter setting; `auto` defers to the environment or platform default.
- * @param environmentBinding - Optional `NOBLE_BINDINGS` override.
+ * @param configuredBinding - Adapter setting; `auto` selects the platform default.
  * @param automaticHciFallback - Whether Automatic should use Raw HCI as a fallback.
  */
 export function resolveNobleBinding(
   platform: NodeJS.Platform,
   configuredBinding?: string,
-  environmentBinding?: string,
   automaticHciFallback?: boolean,
 ): NobleBinding {
   const configured = configuredBinding?.trim().toLowerCase();
   if (configured && configured !== "auto" && NOBLE_BINDINGS.has(configured)) {
     return configured as NobleBinding;
-  }
-
-  const environment = environmentBinding?.trim().toLowerCase();
-  if (environment && NOBLE_BINDINGS.has(environment)) {
-    return environment as NobleBinding;
   }
 
   if (platform === "linux" && automaticHciFallback) {
@@ -108,6 +106,10 @@ function isAttributeNotFoundError(error: unknown): boolean {
   return /attribute (?:could not be found|not found)/i.test(message);
 }
 
+function isPeripheralConnected(peripheral: Peripheral): boolean {
+  return peripheral.state === "connected";
+}
+
 function hasService(peripheral: Peripheral, serviceUuid: string): boolean {
   const advertised = peripheral.advertisement?.serviceUuids;
   return (
@@ -130,13 +132,14 @@ function hasEaseeManufacturerId(peripheral: Peripheral): boolean {
 function waitForAdapterPoweredOn(
   noble: Noble,
   timeoutMs: number,
-  cancellation: Promise<never>,
+  cancellation: AbortSignal,
+  timers: BluetoothTimerApi,
 ): Promise<void> {
   if (noble.state === "poweredOn") {
     return Promise.resolve();
   }
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: ioBroker.Timeout | undefined;
   let onStateChange: ((state: BluetoothAdapterState) => void) | undefined;
   const readiness = new Promise<void>((resolve, reject) => {
     onStateChange = (state) => {
@@ -149,15 +152,19 @@ function waitForAdapterPoweredOn(
       resolve();
       return;
     }
-    timer = setTimeout(
+    timer = timers.setTimeout(
       () => reject(new Error("Timed out waiting for the BLE adapter")),
       timeoutMs,
     );
   });
 
-  return Promise.race([readiness, cancellation]).finally(() => {
+  return raceWithAbortSignal(
+    readiness,
+    cancellation,
+    () => new Error("BLE discovery cancelled"),
+  ).finally(() => {
     if (timer) {
-      clearTimeout(timer);
+      timers.clearTimeout(timer);
     }
     if (onStateChange) {
       noble.removeListener("stateChange", onStateChange);
@@ -169,15 +176,68 @@ function withTimeout<T>(
   operation: Promise<T>,
   timeoutMs: number,
   message: string,
-  cancellation?: Promise<never>,
+  timers: BluetoothTimerApi,
+  cancellation?: AbortSignal,
+  cancellationMessage = "BLE operation cancelled",
 ): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  return raceWithTimeoutAndAbort(
+    operation,
+    timeoutMs,
+    timers,
+    () => new Error(message),
+    cancellation,
+    () => new Error(cancellationMessage),
+  );
+}
+
+type RegisterCloseCancellation = (cancel: () => void) => () => void;
+
+function withScannerClose<T>(
+  operation: Promise<T>,
+  scannerClosed: AbortSignal,
+): Promise<T> {
+  return raceWithAbortSignal(
+    operation,
+    scannerClosed,
+    () => new Error("BLE scanner is closed"),
+  );
+}
+
+function waitForCharacteristicRetryQuietWindow(
+  timers: BluetoothTimerApi,
+  registerCloseCancellation: RegisterCloseCancellation,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let timer: ioBroker.Timeout | undefined;
+    let settled = false;
+    let unregister = (): void => undefined;
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      unregister();
+      unregister = (): void => undefined;
+      if (timer) {
+        timers.clearTimeout(timer);
+        timer = undefined;
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    unregister = registerCloseCancellation(() =>
+      finish(new Error("BLE scanner is closed")),
+    );
+    if (!settled) {
+      timer = timers.setTimeout(
+        () => finish(),
+        CHARACTERISTIC_DISCOVERY_RETRY_QUIET_WINDOW_MS,
+      );
+    }
   });
-  return Promise.race(
-    cancellation ? [operation, timeout, cancellation] : [operation, timeout],
-  ).finally(() => clearTimeout(timer));
 }
 
 function unwrapDbusValue(value: unknown): unknown {
@@ -191,13 +251,17 @@ function unwrapDbusValue(value: unknown): unknown {
  * Pairs the connected BlueZ device after an authenticated-write error.
  *
  * @param address The BlueZ device address associated with the connected peripheral.
+ * @param timers Adapter-owned timer API.
  * @param timeoutMs Maximum time allowed for D-Bus discovery and pairing.
  * @param busFactory Creates the system bus used to call BlueZ.
+ * @param scannerClosed Signal aborted when scanner closure cancels pairing.
  */
 export async function pairBluezDevice(
   address: string,
+  timers: BluetoothTimerApi,
   timeoutMs = BLUEZ_PAIR_TIMEOUT_MS,
   busFactory: () => MessageBus = systemBus,
+  scannerClosed?: AbortSignal,
 ): Promise<void> {
   validateTimeoutMs(timeoutMs, "BlueZ pairing timeout");
   const bus = busFactory();
@@ -229,7 +293,14 @@ export async function pairBluezDevice(
   })();
 
   try {
-    await withTimeout(operation, timeoutMs, timeoutMessage);
+    await withTimeout(
+      operation,
+      timeoutMs,
+      timeoutMessage,
+      timers,
+      scannerClosed,
+      "BLE scanner is closed",
+    );
   } catch (error) {
     if (error instanceof Error && error.message === timeoutMessage) {
       throw error;
@@ -265,13 +336,7 @@ function canNobleResolveHciDependency(): boolean {
 }
 
 async function loadDefaultNoble(binding?: NobleBinding): Promise<Noble> {
-  const selectedBinding =
-    binding ??
-    resolveNobleBinding(
-      process.platform,
-      undefined,
-      process.env.NOBLE_BINDINGS,
-    );
+  const selectedBinding = binding ?? resolveNobleBinding(process.platform);
 
   const requireFromAdapter = createRequire(__filename);
   if (selectedBinding === "dbus") {
@@ -345,16 +410,20 @@ function exactCharacteristic(
 
 async function resolveCharacteristics(
   peripheral: Peripheral,
-  diagnosticLogger?: BluetoothDiagnosticLogger,
-  retryIncompleteCharacteristics = false,
+  timers: BluetoothTimerApi,
+  diagnosticLogger: BluetoothDiagnosticLogger | undefined,
+  retryIncompleteCharacteristics: boolean,
+  scannerClosed: AbortSignal,
+  registerCloseCancellation: RegisterCloseCancellation,
 ): Promise<ReadonlyMap<BluetoothChannel, Characteristic>> {
   const serviceDiscoveryStartedAt = bluetoothDiagnosticNow();
   logBluetoothDiagnostic(diagnosticLogger, "gatt.service_discovery", "started");
   let service: Service;
   try {
-    const services = await peripheral.discoverServicesAsync([
-      normalizeUuid(BLUETOOTH_SERVICE_UUID),
-    ]);
+    const services = await withScannerClose(
+      peripheral.discoverServicesAsync([normalizeUuid(BLUETOOTH_SERVICE_UUID)]),
+      scannerClosed,
+    );
     const matchingServices = services.filter(
       (candidate) =>
         normalizeUuid(candidate.uuid) === normalizeUuid(BLUETOOTH_SERVICE_UUID),
@@ -400,8 +469,11 @@ async function resolveCharacteristics(
     while (true) {
       attempt++;
       missingCount = undefined;
-      characteristics = await service.discoverCharacteristicsAsync(
-        CHARACTERISTIC_UUIDS.map(normalizeUuid),
+      characteristics = await withScannerClose(
+        service.discoverCharacteristicsAsync(
+          CHARACTERISTIC_UUIDS.map(normalizeUuid),
+        ),
+        scannerClosed,
       );
       const missingChannels: BluetoothChannel[] = [];
       for (const channel of CHANNELS) {
@@ -433,8 +505,9 @@ async function resolveCharacteristics(
             },
           },
         );
-        await new Promise<void>((resolve) =>
-          setTimeout(resolve, CHARACTERISTIC_DISCOVERY_RETRY_QUIET_WINDOW_MS),
+        await waitForCharacteristicRetryQuietWindow(
+          timers,
+          registerCloseCancellation,
         );
         continue;
       }
@@ -918,21 +991,24 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   private discoveryInFlight = false;
   private cancelDiscovery?: () => void;
   private closed = false;
+  private readonly closeCancellations = new Set<() => void>();
+  private readonly closeController = new AbortController();
 
   /**
    * Creates a scanner using the selected Noble binding.
    *
    * @param noble Initialized Noble instance.
    * @param binding Binding used to access the local adapter.
+   * @param timers Adapter-owned timer API.
    * @param diagnosticLogger Optional logger for sanitized BLE phase diagnostics.
+   * @param bluezBusFactory Creates the bus used for BlueZ pairing.
    */
   constructor(
     private readonly noble: Noble,
-    private readonly binding: NobleBinding = resolveNobleBinding(
-      process.platform,
-      process.env.NOBLE_BINDINGS,
-    ),
+    private readonly binding: NobleBinding,
+    private readonly timers: BluetoothTimerApi,
     private readonly diagnosticLogger?: BluetoothDiagnosticLogger,
+    private readonly bluezBusFactory: () => MessageBus = systemBus,
   ) {}
 
   /** Returns the Noble binding selected for this scanner. */
@@ -978,16 +1054,13 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       { fields: { timeoutMs } },
     );
     const deadline = Date.now() + timeoutMs;
-    let rejectCancellation: ((error: Error) => void) | undefined;
-    let scanDelayTimer: ReturnType<typeof setTimeout> | undefined;
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      rejectCancellation = reject;
-    });
+    let scanDelayTimer: ioBroker.Timeout | undefined;
+    const discoveryCancellation = new AbortController();
     this.cancelDiscovery = () => {
       if (scanDelayTimer) {
-        clearTimeout(scanDelayTimer);
+        this.timers.clearTimeout(scanDelayTimer);
       }
-      rejectCancellation?.(new Error("BLE discovery cancelled"));
+      discoveryCancellation.abort();
     };
     let onDiscover: ((peripheral: Peripheral) => void) | undefined;
     let discoveredCount = 0;
@@ -1004,7 +1077,8 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
         await waitForAdapterPoweredOn(
           this.noble,
           Math.max(0, deadline - Date.now()),
-          cancelled,
+          discoveryCancellation.signal,
+          this.timers,
         );
         logBluetoothDiagnostic(
           this.diagnosticLogger,
@@ -1091,7 +1165,9 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           startScanning,
           deadline - Date.now(),
           "Timed out starting BLE discovery",
-          cancelled,
+          this.timers,
+          discoveryCancellation.signal,
+          "BLE discovery cancelled",
         );
         logBluetoothDiagnostic(
           this.diagnosticLogger,
@@ -1117,12 +1193,13 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       }
       const remainingMs = deadline - Date.now();
       if (remainingMs > 0) {
-        await Promise.race([
+        await raceWithAbortSignal(
           new Promise<void>((resolve) => {
-            scanDelayTimer = setTimeout(resolve, remainingMs);
+            scanDelayTimer = this.timers.setTimeout(resolve, remainingMs);
           }),
-          cancelled,
-        ]);
+          discoveryCancellation.signal,
+          () => new Error("BLE discovery cancelled"),
+        );
       }
       const results = [...discovered.values()];
       discoveredCount = results.length;
@@ -1141,7 +1218,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       throw error;
     } finally {
       if (scanDelayTimer) {
-        clearTimeout(scanDelayTimer);
+        this.timers.clearTimeout(scanDelayTimer);
       }
       if (onDiscover) {
         this.noble.removeListener("discover", onDiscover);
@@ -1222,7 +1299,18 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           "started",
         );
         try {
-          await peripheral.connectAsync();
+          const connecting = peripheral.connectAsync();
+          void connecting.then(
+            () => {
+              if (this.closed && isPeripheralConnected(peripheral)) {
+                void Promise.resolve()
+                  .then(() => peripheral.disconnectAsync())
+                  .catch(() => undefined);
+              }
+            },
+            () => undefined,
+          );
+          await withScannerClose(connecting, this.closeController.signal);
           logBluetoothDiagnostic(
             this.diagnosticLogger,
             "transport.link_connect",
@@ -1261,8 +1349,11 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       try {
         characteristics = await resolveCharacteristics(
           peripheral,
+          this.timers,
           this.diagnosticLogger,
           this.binding === "hci",
+          this.closeController.signal,
+          (cancel) => this.registerCloseCancellation(cancel),
         );
         logBluetoothDiagnostic(
           this.diagnosticLogger,
@@ -1290,8 +1381,11 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
             "transport.disconnect",
             "cleanup_started",
           );
+          const disconnecting = Promise.resolve().then(() =>
+            peripheral.disconnectAsync(),
+          );
           try {
-            await peripheral.disconnectAsync();
+            await withScannerClose(disconnecting, this.closeController.signal);
             logBluetoothDiagnostic(
               this.diagnosticLogger,
               "transport.disconnect",
@@ -1301,15 +1395,19 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
               },
             );
           } catch (disconnectError) {
-            logBluetoothDiagnostic(
-              this.diagnosticLogger,
-              "transport.disconnect",
-              "cleanup_failed",
-              {
-                durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
-                error: disconnectError,
-              },
-            );
+            if (this.closed) {
+              void disconnecting.catch(() => undefined);
+            } else {
+              logBluetoothDiagnostic(
+                this.diagnosticLogger,
+                "transport.disconnect",
+                "cleanup_failed",
+                {
+                  durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
+                  error: disconnectError,
+                },
+              );
+            }
           }
         }
         throw error;
@@ -1324,7 +1422,13 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
                 "started",
               );
               try {
-                await pairBluezDevice(peripheral.address);
+                await pairBluezDevice(
+                  peripheral.address,
+                  this.timers,
+                  BLUEZ_PAIR_TIMEOUT_MS,
+                  this.bluezBusFactory,
+                  this.closeController.signal,
+                );
                 logBluetoothDiagnostic(
                   this.diagnosticLogger,
                   "transport.pairing",
@@ -1401,6 +1505,10 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       return;
     }
     this.closed = true;
+    for (const cancel of [...this.closeCancellations]) {
+      cancel();
+    }
+    this.closeController.abort();
     try {
       this.cancelDiscovery?.();
       if (this.scanning) {
@@ -1444,6 +1552,15 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     }
   }
 
+  private registerCloseCancellation(cancel: () => void): () => void {
+    if (this.closed) {
+      cancel();
+      return () => undefined;
+    }
+    this.closeCancellations.add(cancel);
+    return () => this.closeCancellations.delete(cancel);
+  }
+
   private assertOpen(): void {
     if (this.closed) {
       throw new Error("BLE scanner is closed");
@@ -1457,27 +1574,27 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
  * @param factory Lazy Noble factory.
  * @param configuredBinding Optional adapter-selected binding.
  * @param diagnosticLogger Optional logger for sanitized BLE phase diagnostics.
+ * @param timers Adapter-owned timer API.
  */
 export async function createNobleBluetoothScanner(
-  factory: NobleFactory = loadDefaultNoble,
-  configuredBinding?: string,
-  diagnosticLogger?: BluetoothDiagnosticLogger,
+  factory: NobleFactory | undefined,
+  configuredBinding: string | undefined,
+  diagnosticLogger: BluetoothDiagnosticLogger | undefined,
+  timers: BluetoothTimerApi,
 ): Promise<NobleBluetoothScanner> {
-  const environmentBinding = process.env.NOBLE_BINDINGS;
+  const selectedFactory = factory ?? loadDefaultNoble;
   const selectedBinding = resolveNobleBinding(
     process.platform,
     configuredBinding,
-    environmentBinding,
   );
   const automaticHciFallback =
-    factory === loadDefaultNoble &&
+    selectedFactory === loadDefaultNoble &&
     selectedBinding === "dbus" &&
     !canNobleResolveDbusDependency() &&
     canNobleResolveHciDependency();
   const binding = resolveNobleBinding(
     process.platform,
     configuredBinding,
-    environmentBinding,
     automaticHciFallback,
   );
   if (automaticHciFallback && binding === "hci") {
@@ -1486,8 +1603,9 @@ export async function createNobleBluetoothScanner(
     );
   }
   return new NobleBluetoothScanner(
-    await factory(binding),
+    await selectedFactory(binding),
     binding,
+    timers,
     diagnosticLogger,
   );
 }

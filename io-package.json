@@ -5,6 +5,7 @@
       "custom": true,
       "deviceManager": true
     },
+    "nogit": true,
     "version": "4.0.0",
     "news": {
       "4.0.0": {

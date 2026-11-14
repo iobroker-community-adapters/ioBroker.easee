@@ -13,14 +13,36 @@ import {
 } from "../src/lib/bluetooth-protocol.ts";
 import type { BluetoothChannel } from "../src/lib/bluetooth-protocol.ts";
 import type { BluetoothDiagnosticLogger } from "../src/lib/bluetooth-diagnostics.ts";
+import type { BluetoothTimerApi } from "../src/lib/bluetooth-transport.ts";
 import {
   createNobleBluetoothScanner,
   ensureNobleDbusDependency,
-  NobleBluetoothScanner,
+  NobleBluetoothScanner as AdapterNobleBluetoothScanner,
   pairBluezDevice,
   resolveNobleBinding,
 } from "../src/lib/noble-bluetooth-transport.ts";
 import { MAX_NODE_TIMEOUT_MS } from "../src/lib/timeout.ts";
+
+const testTimers: BluetoothTimerApi = {
+  setTimeout: (callback, timeoutMs) =>
+    setTimeout(callback, timeoutMs) as unknown as ioBroker.Timeout,
+  clearTimeout: (timer) => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  },
+};
+
+class NobleBluetoothScanner extends AdapterNobleBluetoothScanner {
+  constructor(
+    noble: Noble,
+    binding: "hci" | "dbus" | "mac" = "hci",
+    diagnosticLogger?: BluetoothDiagnosticLogger,
+    timers: BluetoothTimerApi = testTimers,
+  ) {
+    super(noble, binding, timers, diagnosticLogger);
+  }
+}
 
 async function expectRejectedWithMessage(
   promise: Promise<unknown>,
@@ -110,6 +132,7 @@ class FakeService extends EventEmitter {
 }
 
 class FakePeripheral extends EventEmitter {
+  readonly address = "58:BF:25:22:05:3A";
   state: "connected" | "disconnected" = "disconnected";
   connectable = true;
   connectCount = 0;
@@ -256,11 +279,13 @@ function scanner(
   noble: FakeNoble,
   binding: "hci" | "dbus" | "mac" = "hci",
   diagnosticLogger?: BluetoothDiagnosticLogger,
+  timers: BluetoothTimerApi = testTimers,
 ): NobleBluetoothScanner {
   return new NobleBluetoothScanner(
     noble as unknown as Noble,
     binding,
     diagnosticLogger,
+    timers,
   );
 }
 
@@ -311,7 +336,7 @@ describe("BlueZ pairing", () => {
       MAX_NODE_TIMEOUT_MS + 1,
     ]) {
       await expectRejectedWithMessage(
-        pairBluezDevice("58:BF:25:22:05:3A", timeoutMs, () => {
+        pairBluezDevice("58:BF:25:22:05:3A", testTimers, timeoutMs, () => {
           busFactoryCalls++;
           return fakeBluezBus(() => Promise.resolve(), {
             pairCalls: 0,
@@ -328,7 +353,7 @@ describe("BlueZ pairing", () => {
     const counters = { pairCalls: 0, disconnects: 0 };
     const busFactory = (): MessageBus =>
       fakeBluezBus(() => Promise.resolve(), counters);
-    await pairBluezDevice("58:BF:25:22:05:3A", 100, busFactory);
+    await pairBluezDevice("58:BF:25:22:05:3A", testTimers, 100, busFactory);
 
     expect(counters).to.deep.equal({ pairCalls: 1, disconnects: 1 });
   });
@@ -340,7 +365,12 @@ describe("BlueZ pairing", () => {
         () => Promise.reject(new Error("AuthenticationCanceled")),
         counters,
       );
-    const pairing = pairBluezDevice("58:BF:25:22:05:3A", 100, busFactory);
+    const pairing = pairBluezDevice(
+      "58:BF:25:22:05:3A",
+      testTimers,
+      100,
+      busFactory,
+    );
     await expectRejectedWithMessage(
       pairing,
       "BlueZ pairing failed: AuthenticationCanceled",
@@ -352,12 +382,81 @@ describe("BlueZ pairing", () => {
     const counters = { pairCalls: 0, disconnects: 0 };
     const busFactory = (): MessageBus =>
       fakeBluezBus(() => new Promise(() => undefined), counters);
-    const pairing = pairBluezDevice("58:BF:25:22:05:3A", 5, busFactory);
+    const pairing = pairBluezDevice(
+      "58:BF:25:22:05:3A",
+      testTimers,
+      5,
+      busFactory,
+    );
     await expectRejectedWithMessage(
       pairing,
       "BlueZ pairing timed out after 5 ms",
     );
     expect(counters).to.deep.equal({ pairCalls: 1, disconnects: 1 });
+  });
+
+  it("cancels a pending Device1.Pair on scanner close and disconnects its bus", async () => {
+    const counters = { pairCalls: 0, disconnects: 0 };
+    const pairingTimers = new Set<ioBroker.Timeout>();
+    let scheduledPairingTimers = 0;
+    let clearedPairingTimers = 0;
+    const timers: BluetoothTimerApi = {
+      setTimeout: (callback, timeoutMs) => {
+        const timer = setTimeout(
+          callback,
+          timeoutMs,
+        ) as unknown as ioBroker.Timeout;
+        if (timeoutMs === 30_000) {
+          pairingTimers.add(timer);
+          scheduledPairingTimers++;
+        }
+        return timer;
+      },
+      clearTimeout: (timer) => {
+        if (timer && pairingTimers.delete(timer)) {
+          clearedPairingTimers++;
+        }
+        if (timer) {
+          clearTimeout(timer);
+        }
+      },
+    };
+    let resolvePairStarted!: () => void;
+    const pairStarted = new Promise<void>((resolve) => {
+      resolvePairStarted = resolve;
+    });
+    const busFactory = (): MessageBus =>
+      fakeBluezBus(() => {
+        resolvePairStarted();
+        return new Promise<void>(() => undefined);
+      }, counters);
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const transport = new AdapterNobleBluetoothScanner(
+      noble as unknown as Noble,
+      "dbus",
+      timers,
+      undefined,
+      busFactory,
+    );
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    const link = await transport.connect({ id: fixture.peripheral.id });
+    const pair = link.pair;
+    if (!pair) {
+      throw new Error("Expected BlueZ pairing support");
+    }
+    const pairing = pair.call(link);
+    await pairStarted;
+
+    await transport.close();
+    await expectRejectedWithMessage(pairing, "BLE scanner is closed");
+
+    expect(counters).to.deep.equal({ pairCalls: 1, disconnects: 1 });
+    expect(scheduledPairingTimers).to.equal(1);
+    expect(clearedPairingTimers).to.equal(scheduledPairingTimers);
+    expect(pairingTimers.size).to.equal(0);
   });
 });
 
@@ -381,24 +480,43 @@ describe("Noble Bluetooth transport", () => {
     await transport.close();
   });
 
+  it("uses and clears the injected adapter timers during discovery", async () => {
+    const noble = new FakeNoble();
+    let scheduled = 0;
+    let cleared = 0;
+    const timers: BluetoothTimerApi = {
+      setTimeout: (callback, timeoutMs) => {
+        scheduled++;
+        return testTimers.setTimeout(callback, timeoutMs);
+      },
+      clearTimeout: (timer) => {
+        cleared++;
+        testTimers.clearTimeout(timer);
+      },
+    };
+    const transport = new AdapterNobleBluetoothScanner(
+      noble as unknown as Noble,
+      "hci",
+      timers,
+    );
+
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 10);
+    await transport.close();
+
+    expect(scheduled).to.be.greaterThan(0);
+    expect(cleared).to.equal(scheduled);
+  });
+
   it("uses BlueZ D-Bus by default on Linux and preserves binding precedence", () => {
     expect(resolveNobleBinding("linux")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "hci")).to.equal("hci");
     expect(resolveNobleBinding("linux", "dbus")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "default")).to.equal("dbus");
     expect(resolveNobleBinding("linux", "auto")).to.equal("dbus");
-    expect(resolveNobleBinding("linux", "auto", "hci")).to.equal("hci");
-    expect(resolveNobleBinding("linux", "hci", "dbus")).to.equal("hci");
-    expect(resolveNobleBinding("linux", "auto", undefined, true)).to.equal(
-      "hci",
-    );
-    expect(resolveNobleBinding("linux", "auto", undefined, false)).to.equal(
-      "dbus",
-    );
-    expect(resolveNobleBinding("linux", "dbus", undefined, true)).to.equal(
-      "dbus",
-    );
-    expect(resolveNobleBinding("linux", "auto", "dbus", true)).to.equal("dbus");
+    expect(resolveNobleBinding("linux", "hci")).to.equal("hci");
+    expect(resolveNobleBinding("linux", "auto", true)).to.equal("hci");
+    expect(resolveNobleBinding("linux", "auto", false)).to.equal("dbus");
+    expect(resolveNobleBinding("linux", "dbus", true)).to.equal("dbus");
     expect(resolveNobleBinding("darwin")).to.equal("default");
     expect(scanner(new FakeNoble(), "hci").getBinding()).to.equal("hci");
   });
@@ -417,10 +535,15 @@ describe("Noble Bluetooth transport", () => {
   it("loads Noble lazily through withBindings only when its factory is called", async () => {
     const noble = new FakeNoble();
     let factoryCalls = 0;
-    const transport = await createNobleBluetoothScanner(() => {
-      factoryCalls++;
-      return Promise.resolve(noble as unknown as Noble);
-    });
+    const transport = await createNobleBluetoothScanner(
+      () => {
+        factoryCalls++;
+        return Promise.resolve(noble as unknown as Noble);
+      },
+      undefined,
+      undefined,
+      testTimers,
+    );
     expect(factoryCalls).to.equal(1);
     await transport.close();
     expect(noble.stopped).to.equal(1);
@@ -429,10 +552,15 @@ describe("Noble Bluetooth transport", () => {
   it("passes the selected binding to Noble and reports it on the scanner", async () => {
     const noble = new FakeNoble();
     let selectedBinding: string | undefined;
-    const transport = await createNobleBluetoothScanner((binding) => {
-      selectedBinding = binding;
-      return Promise.resolve(noble as unknown as Noble);
-    }, "hci");
+    const transport = await createNobleBluetoothScanner(
+      (binding) => {
+        selectedBinding = binding;
+        return Promise.resolve(noble as unknown as Noble);
+      },
+      "hci",
+      undefined,
+      testTimers,
+    );
 
     expect(selectedBinding).to.equal("hci");
     expect(transport.getBinding()).to.equal("hci");
@@ -1067,6 +1195,56 @@ describe("Noble Bluetooth transport", () => {
     );
     await link.disconnect();
     await transport.close();
+  });
+
+  it("clears the characteristic retry quiet window when closed", async () => {
+    let quietWindowStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      quietWindowStarted = resolve;
+    });
+    let quietTimer: ioBroker.Timeout | undefined;
+    let quietTimerClears = 0;
+    let quietTimerFired = false;
+    const timers: BluetoothTimerApi = {
+      setTimeout: (callback, timeoutMs) => {
+        const timer = setTimeout(() => {
+          if (timer === quietTimer) {
+            quietTimerFired = true;
+          }
+          callback();
+        }, timeoutMs) as unknown as ioBroker.Timeout;
+        if (timeoutMs === 250) {
+          quietTimer = timer;
+          quietWindowStarted();
+        }
+        return timer;
+      },
+      clearTimeout: (timer) => {
+        if (timer === quietTimer) {
+          quietTimerClears++;
+        }
+        if (timer) {
+          clearTimeout(timer);
+        }
+      },
+    };
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    fixture.service.discoveryResults = [fixture.characteristics.slice(1)];
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    const transport = scanner(noble, "hci", undefined, timers);
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+
+    const connecting = transport.connect({ id: fixture.peripheral.id });
+    await started;
+    await transport.close();
+
+    await expectRejectedWithMessage(connecting, "BLE scanner is closed");
+    expect(quietTimerClears).to.equal(1);
+    expect(quietTimerFired).to.equal(false);
+    expect(fixture.service.discoveryCalls).to.equal(1);
+    expect(fixture.peripheral.disconnectCount).to.equal(1);
   });
 
   it("does not retry incomplete characteristic discovery on non-HCI bindings", async () => {
