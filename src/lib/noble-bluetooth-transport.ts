@@ -1692,10 +1692,16 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     for (const peripheral of this.inFlightPeripherals) {
       if (peripheral.state === "connecting") {
         const connecting = this.inFlightConnectOperations.get(peripheral);
-        const connectionSettled = connecting?.then(
-          () => undefined,
-          () => undefined,
-        );
+        const connectionSettled = connecting
+          ?.then(
+            () => undefined,
+            () => undefined,
+          )
+          .then(async () => {
+            if (isPeripheralConnected(peripheral)) {
+              await this.disconnectPeripheralDuringClose(peripheral);
+            }
+          });
         logBluetoothDiagnostic(
           this.diagnosticLogger,
           "transport.link_connect",
@@ -1720,39 +1726,43 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
         continue;
       }
 
-      const cleanupStartedAt = bluetoothDiagnosticNow();
-      logBluetoothDiagnostic(
-        this.diagnosticLogger,
-        "transport.disconnect",
-        "cleanup_started",
-      );
-      cleanupOperations.push(
-        this.disconnectPeripheralOnce(peripheral).then(
-          () => {
-            logBluetoothDiagnostic(
-              this.diagnosticLogger,
-              "transport.disconnect",
-              "cleanup_completed",
-              {
-                durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
-              },
-            );
-          },
-          (error: unknown) => {
-            logBluetoothDiagnostic(
-              this.diagnosticLogger,
-              "transport.disconnect",
-              "cleanup_failed",
-              {
-                durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
-                error,
-              },
-            );
-          },
-        ),
-      );
+      cleanupOperations.push(this.disconnectPeripheralDuringClose(peripheral));
     }
     return cleanupOperations;
+  }
+
+  private disconnectPeripheralDuringClose(
+    peripheral: Peripheral,
+  ): Promise<void> {
+    const cleanupStartedAt = bluetoothDiagnosticNow();
+    logBluetoothDiagnostic(
+      this.diagnosticLogger,
+      "transport.disconnect",
+      "cleanup_started",
+    );
+    return this.disconnectPeripheralOnce(peripheral).then(
+      () => {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.disconnect",
+          "cleanup_completed",
+          {
+            durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
+          },
+        );
+      },
+      (error: unknown) => {
+        logBluetoothDiagnostic(
+          this.diagnosticLogger,
+          "transport.disconnect",
+          "cleanup_failed",
+          {
+            durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
+            error,
+          },
+        );
+      },
+    );
   }
 
   private disconnectPeripheralOnce(peripheral: Peripheral): Promise<void> {
