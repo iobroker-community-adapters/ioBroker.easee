@@ -1690,7 +1690,7 @@ describe("Noble Bluetooth transport", () => {
         "BLE scanner is closed",
       );
       closing = transport.close();
-      expect(retrying).to.equal(connecting);
+      expect(retrying).not.to.equal(connecting);
       expect(fixture.peripheral.connectCount).to.equal(1);
       await Promise.all([connectionCancelled, retryCancelled]);
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1826,6 +1826,68 @@ describe("Noble Bluetooth transport", () => {
       resolveDisconnect?.();
       await closing?.catch(() => undefined);
     }
+  });
+
+  it("keeps a shared BlueZ link open until its current owner releases it", async () => {
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+
+    let notifyConnectStarted!: () => void;
+    const connectStarted = new Promise<void>((resolve) => {
+      notifyConnectStarted = resolve;
+    });
+    let resolveNativeConnect!: () => void;
+    noble.onNativeConnect = () => {
+      notifyConnectStarted();
+      return new Promise<void>((resolve) => {
+        resolveNativeConnect = resolve;
+      });
+    };
+
+    const transport = scanner(noble, "dbus");
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    let peripheralConnectOperation: Promise<void> | undefined;
+    fixture.peripheral.connectAsync = () => {
+      fixture.peripheral.connectCount++;
+      fixture.peripheral.state = "connecting";
+      peripheralConnectOperation = new Promise<void>((resolve, reject) => {
+        fixture.peripheral.once("connect", (error?: Error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      });
+      void noble._bindings._connect(fixture.peripheral.id).then(
+        () => {
+          fixture.peripheral.state = "connected";
+          fixture.peripheral.emit("connect");
+        },
+        (error: unknown) => fixture.peripheral.emit("connect", error),
+      );
+      return peripheralConnectOperation;
+    };
+
+    const candidate = { id: fixture.peripheral.id };
+    const abandonedOpening = transport.connect(candidate);
+    const abandonedCleanup = abandonedOpening.then((link) => link.disconnect());
+    await connectStarted;
+    const currentOpening = transport.connect(candidate);
+    expect(fixture.peripheral.connectCount).to.equal(1);
+
+    resolveNativeConnect();
+    const currentLink = await currentOpening;
+    await abandonedCleanup;
+    expect(fixture.peripheral.disconnectCount).to.equal(0);
+    expect(fixture.peripheral.state).to.equal("connected");
+
+    await currentLink.subscribe("hello", () => undefined);
+    await currentLink.disconnect();
+    expect(fixture.peripheral.disconnectCount).to.equal(1);
+    await transport.close();
   });
 
   it("disconnects active links while waiting for in-flight BlueZ cleanup", async () => {

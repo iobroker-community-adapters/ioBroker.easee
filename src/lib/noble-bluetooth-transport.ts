@@ -623,7 +623,7 @@ class NobleBluetoothLink implements BluetoothLink {
     (data: Buffer, isNotification: boolean) => void
   >();
   private readonly passiveNotificationChannels = new Set<BluetoothChannel>();
-  private disconnectListener?: () => void;
+  private readonly disconnectListeners = new Set<() => void>();
   private disconnected = false;
   private closing?: Promise<void>;
   private readonly connectedAt = bluetoothDiagnosticNow();
@@ -895,10 +895,11 @@ class NobleBluetoothLink implements BluetoothLink {
   }
 
   onDisconnect(listener: () => void): void {
-    this.disconnectListener = listener;
     if (this.disconnected) {
       listener();
+      return;
     }
+    this.disconnectListeners.add(listener);
   }
 
   disconnect(): Promise<void> {
@@ -1027,8 +1028,126 @@ class NobleBluetoothLink implements BluetoothLink {
     }
     this.notificationListeners.clear();
     this.passiveNotificationChannels.clear();
-    this.disconnectListener?.();
+    for (const listener of this.disconnectListeners) {
+      listener();
+    }
+    this.disconnectListeners.clear();
   };
+}
+
+class SharedNobleBluetoothLink {
+  private readonly owners = new Set<symbol>();
+  private readonly disconnectListeners = new Map<symbol, () => void>();
+  private disconnectOperation?: Promise<void>;
+  private disconnected = false;
+
+  constructor(private readonly link: BluetoothLink) {
+    link.onDisconnect(() => this.handleDisconnect());
+  }
+
+  acquire(): BluetoothLink {
+    const owner = Symbol();
+    this.owners.add(owner);
+    return new NobleBluetoothLinkLease(this, owner);
+  }
+
+  getPairingFunction(): (() => Promise<void>) | undefined {
+    const pair = this.link.pair;
+    return pair ? () => pair.call(this.link) : undefined;
+  }
+
+  subscribe(
+    channel: BluetoothChannel,
+    listener: (data: Buffer) => void,
+  ): Promise<void> {
+    return this.link.subscribe(channel, listener);
+  }
+
+  write(channel: BluetoothChannel, data: Buffer): Promise<void> {
+    return this.link.write(channel, data);
+  }
+
+  onDisconnect(owner: symbol, listener: () => void): void {
+    if (!this.owners.has(owner) || this.disconnected) {
+      listener();
+      return;
+    }
+    this.disconnectListeners.set(owner, listener);
+  }
+
+  release(owner: symbol): Promise<void> {
+    if (!this.owners.delete(owner)) {
+      return this.disconnectOperation ?? Promise.resolve();
+    }
+    this.disconnectListeners.delete(owner);
+    if (this.owners.size > 0) {
+      return Promise.resolve();
+    }
+    this.disconnectOperation ??= this.link.disconnect();
+    return this.disconnectOperation;
+  }
+
+  private handleDisconnect(): void {
+    if (this.disconnected) {
+      return;
+    }
+    this.disconnected = true;
+    for (const listener of this.disconnectListeners.values()) {
+      listener();
+    }
+    this.disconnectListeners.clear();
+  }
+}
+
+class NobleBluetoothLinkLease implements BluetoothLink {
+  readonly pair?: () => Promise<void>;
+  private released = false;
+  private disconnectOperation?: Promise<void>;
+
+  constructor(
+    private readonly sharedLink: SharedNobleBluetoothLink,
+    private readonly owner: symbol,
+  ) {
+    const pair = sharedLink.getPairingFunction();
+    if (pair) {
+      this.pair = () => {
+        this.assertActive();
+        return pair();
+      };
+    }
+  }
+
+  subscribe(
+    channel: BluetoothChannel,
+    listener: (data: Buffer) => void,
+  ): Promise<void> {
+    this.assertActive();
+    return this.sharedLink.subscribe(channel, listener);
+  }
+
+  write(channel: BluetoothChannel, data: Buffer): Promise<void> {
+    this.assertActive();
+    return this.sharedLink.write(channel, data);
+  }
+
+  onDisconnect(listener: () => void): void {
+    this.sharedLink.onDisconnect(this.owner, listener);
+  }
+
+  disconnect(): Promise<void> {
+    if (this.disconnectOperation) {
+      return this.disconnectOperation;
+    }
+    this.released = true;
+    this.disconnectOperation = this.sharedLink.release(this.owner);
+    return this.disconnectOperation;
+  }
+
+  private assertActive(): void {
+    if (this.released) {
+      throw new Error("BLE peripheral is disconnected");
+    }
+  }
 }
 
 export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
@@ -1037,6 +1156,10 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   private readonly inFlightConnectionAttempts = new Map<
     Peripheral,
     Promise<BluetoothLink>
+  >();
+  private readonly sharedBluetoothLinks = new WeakMap<
+    BluetoothLink,
+    SharedNobleBluetoothLink
   >();
   private readonly inFlightPeripherals = new Set<Peripheral>();
   private readonly inFlightConnectOperations = new Map<
@@ -1372,7 +1495,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     ) {
       const existingAttempt = this.inFlightConnectionAttempts.get(peripheral);
       if (existingAttempt) {
-        return existingAttempt;
+        return existingAttempt.then((link) => this.createLinkLease(link));
       }
       const attempt = this.connectCandidate(candidate);
       this.inFlightConnectionAttempts.set(peripheral, attempt);
@@ -1382,9 +1505,20 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
         }
       };
       void attempt.then(clearAttempt, clearAttempt);
-      return attempt;
+      return attempt.then((link) => this.createLinkLease(link));
     }
-    return this.connectCandidate(candidate);
+    return this.connectCandidate(candidate).then((link) =>
+      this.createLinkLease(link),
+    );
+  }
+
+  private createLinkLease(link: BluetoothLink): BluetoothLink {
+    let sharedLink = this.sharedBluetoothLinks.get(link);
+    if (!sharedLink) {
+      sharedLink = new SharedNobleBluetoothLink(link);
+      this.sharedBluetoothLinks.set(link, sharedLink);
+    }
+    return sharedLink.acquire();
   }
 
   private async connectCandidate(
