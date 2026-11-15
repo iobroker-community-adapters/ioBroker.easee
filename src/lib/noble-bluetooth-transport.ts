@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import hciStatusMessage from "@stoprocent/noble/lib/hci-status-message.js";
 import type {
   Characteristic,
   DisconnectReason,
@@ -48,9 +49,6 @@ type NobleWithDbusBindingsInternals = Noble & {
 
 const NOBLE_BINDINGS = new Set(["hci", "dbus", "mac", "win"]);
 const requireFromAdapter = createRequire(__filename);
-const hciStatusMessage = requireFromAdapter(
-  "@stoprocent/noble/lib/hci-status-message.js",
-) as (reason: number | string) => string;
 
 /**
  * Ensures the Noble package itself can resolve its optional D-Bus peer.
