@@ -1702,7 +1702,10 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
             () => undefined,
           )
           .then(async () => {
-            if (isPeripheralConnected(peripheral)) {
+            if (
+              isPeripheralConnected(peripheral) ||
+              this.peripheralDisconnectOperations.has(peripheral)
+            ) {
               await this.disconnectPeripheralDuringClose(peripheral);
             }
           });

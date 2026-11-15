@@ -139,7 +139,8 @@ class FakeService extends EventEmitter {
 
 class FakePeripheral extends EventEmitter {
   readonly address = "58:BF:25:22:05:3A";
-  state: "connecting" | "connected" | "disconnected" = "disconnected";
+  state: "connecting" | "connected" | "disconnecting" | "disconnected" =
+    "disconnected";
   connectable = true;
   connectCount = 0;
   cancelConnectCount = 0;
@@ -1486,6 +1487,7 @@ describe("Noble Bluetooth transport", () => {
     let resolveDisconnect!: () => void;
     fixture.peripheral.disconnectAsync = () => {
       fixture.peripheral.disconnectCount++;
+      fixture.peripheral.state = "disconnecting";
       order.push("peripheral.disconnect");
       notifyDisconnectStarted();
       return new Promise<void>((resolve) => {
@@ -1516,6 +1518,7 @@ describe("Noble Bluetooth transport", () => {
         "backend.cancelConnect",
         "peripheral.disconnect",
       ]);
+      expect(fixture.peripheral.state).to.equal("disconnecting");
       expect(noble.stopped).to.equal(0);
 
       resolveDisconnect();
