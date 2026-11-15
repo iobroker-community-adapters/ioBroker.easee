@@ -88,6 +88,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (Voodoo2man) Improved cleanup of Bluetooth connections that complete while the adapter shuts down.
+
 ### 4.0.1 (2026-11-15)
 - (Voodoo2man) Fixed repository-checker findings and improved automatic Bluetooth binding selection, timer cleanup, and bounded shutdown handling (up to 10 seconds).
 - (Voodoo2man) Limited the displayed charging power to two decimal places in the Device Manager card.

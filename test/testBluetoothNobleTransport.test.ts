@@ -1394,6 +1394,90 @@ describe("Noble Bluetooth transport", () => {
     expect(fixture.peripheral.state).to.equal("disconnected");
   });
 
+  it("waits for a late successful connection to disconnect before stopping Noble", async () => {
+    const order: string[] = [];
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    noble.onStop = () => order.push("noble.stop");
+    const transport = scanner(noble);
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+
+    let notifyConnectionStarted!: () => void;
+    const connectionStarted = new Promise<void>((resolve) => {
+      notifyConnectionStarted = resolve;
+    });
+    let resolveConnection!: () => void;
+    fixture.peripheral.connectAsync = () => {
+      fixture.peripheral.connectCount++;
+      fixture.peripheral.state = "connecting";
+      notifyConnectionStarted();
+      return new Promise<void>((resolve) => {
+        resolveConnection = () => {
+          fixture.peripheral.state = "connected";
+          resolve();
+        };
+      });
+    };
+    fixture.peripheral.onCancelConnect = () => {
+      order.push("backend.cancelConnect");
+    };
+
+    let notifyDisconnectStarted!: () => void;
+    const disconnectStarted = new Promise<void>((resolve) => {
+      notifyDisconnectStarted = resolve;
+    });
+    let resolveDisconnect!: () => void;
+    fixture.peripheral.disconnectAsync = () => {
+      fixture.peripheral.disconnectCount++;
+      order.push("peripheral.disconnect");
+      notifyDisconnectStarted();
+      return new Promise<void>((resolve) => {
+        resolveDisconnect = () => {
+          fixture.peripheral.state = "disconnected";
+          resolve();
+        };
+      });
+    };
+
+    const connecting = transport.connect({ id: fixture.peripheral.id });
+    const connectionCancelled = expectRejectedWithMessage(
+      connecting,
+      "BLE scanner is closed",
+    );
+    await connectionStarted;
+
+    let closing: Promise<void> | undefined;
+    try {
+      closing = transport.close();
+      expect(order).to.deep.equal(["backend.cancelConnect"]);
+      expect(noble.stopped).to.equal(0);
+
+      resolveConnection();
+      await disconnectStarted;
+      expect(order).to.deep.equal([
+        "backend.cancelConnect",
+        "peripheral.disconnect",
+      ]);
+      expect(noble.stopped).to.equal(0);
+
+      resolveDisconnect();
+      await closing;
+      await connectionCancelled;
+      expect(order).to.deep.equal([
+        "backend.cancelConnect",
+        "peripheral.disconnect",
+        "noble.stop",
+      ]);
+      expect(fixture.peripheral.disconnectCount).to.equal(1);
+    } finally {
+      resolveConnection?.();
+      resolveDisconnect?.();
+      await closing?.catch(() => undefined);
+    }
+  });
+
   it("fails closed when the vendor service or a unique channel is absent", async () => {
     const noble = new FakeNoble();
     const fixture = makePeripheral({
