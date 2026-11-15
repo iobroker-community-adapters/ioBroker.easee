@@ -1034,6 +1034,10 @@ class NobleBluetoothLink implements BluetoothLink {
 export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   private readonly peripherals = new Map<string, Peripheral>();
   private readonly activeLinks = new Set<NobleBluetoothLink>();
+  private readonly inFlightConnectionAttempts = new Map<
+    Peripheral,
+    Promise<BluetoothLink>
+  >();
   private readonly inFlightPeripherals = new Set<Peripheral>();
   private readonly inFlightConnectOperations = new Map<
     Peripheral,
@@ -1359,7 +1363,33 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     return discoveryResults;
   }
 
-  async connect(candidate: BluetoothCandidate): Promise<BluetoothLink> {
+  connect(candidate: BluetoothCandidate): Promise<BluetoothLink> {
+    const peripheral = this.peripherals.get(candidate.id);
+    if (
+      !this.closed &&
+      peripheral &&
+      (!candidate.name || candidate.name === peripheral.advertisement.localName)
+    ) {
+      const existingAttempt = this.inFlightConnectionAttempts.get(peripheral);
+      if (existingAttempt) {
+        return existingAttempt;
+      }
+      const attempt = this.connectCandidate(candidate);
+      this.inFlightConnectionAttempts.set(peripheral, attempt);
+      const clearAttempt = (): void => {
+        if (this.inFlightConnectionAttempts.get(peripheral) === attempt) {
+          this.inFlightConnectionAttempts.delete(peripheral);
+        }
+      };
+      void attempt.then(clearAttempt, clearAttempt);
+      return attempt;
+    }
+    return this.connectCandidate(candidate);
+  }
+
+  private async connectCandidate(
+    candidate: BluetoothCandidate,
+  ): Promise<BluetoothLink> {
     const connectStartedAt = bluetoothDiagnosticNow();
     let inFlightPeripheral: Peripheral | undefined;
     logBluetoothDiagnostic(
@@ -1630,6 +1660,9 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       const shouldStopScanning =
         this.scanning || this.scanStopOperation !== undefined;
       this.scanning = false;
+      const activeLinkDisconnects = [...this.activeLinks].map((link) =>
+        link.disconnect().catch(() => undefined),
+      );
       const scanStopOperation = (async (): Promise<void> => {
         if (!shouldStopScanning) {
           return;
@@ -1660,12 +1693,11 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           );
         }
       })();
-      await Promise.all([scanStopOperation, ...inFlightDisconnects]);
-      await Promise.all(
-        [...this.activeLinks].map((link) =>
-          link.disconnect().catch(() => undefined),
-        ),
-      );
+      await Promise.all([
+        scanStopOperation,
+        ...inFlightDisconnects,
+        ...activeLinkDisconnects,
+      ]);
       this.completeCloseOnce();
     })();
     try {
