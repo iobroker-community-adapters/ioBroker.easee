@@ -207,6 +207,10 @@ class FakePeripheral extends EventEmitter {
   }
 }
 
+type FakeDbusDeviceProxy = {
+  getInterface(name: string): { Connect: () => Promise<void> };
+};
+
 class FakeNoble extends EventEmitter {
   state: "poweredOn" | "poweredOff" = "poweredOn";
   waitTimeouts: number[] = [];
@@ -223,13 +227,16 @@ class FakeNoble extends EventEmitter {
   onScanStop?: () => void;
   discoverOnScan: FakePeripheral[] = [];
   peripherals = new Map<string, FakePeripheral>();
-  readonly _devices = new Map<string, { proxy?: unknown }>();
-  onDeviceProxy?: (id: string) => Promise<unknown>;
+  readonly _devices = new Map<string, { proxy?: FakeDbusDeviceProxy }>();
+  onDeviceProxy?: (id: string) => Promise<FakeDbusDeviceProxy>;
+  onBeforeNativeConnect?: (id: string) => Promise<void>;
   onNativeConnect?: (id: string) => Promise<void>;
   onNativeDisconnect?: (id: string) => Promise<void>;
   readonly _bindings = {
     _devices: this._devices,
-    _ensureDeviceProxy: (id: string): Promise<unknown> => {
+    _ensureDeviceProxy: (
+      id: string,
+    ): Promise<{ proxy?: FakeDbusDeviceProxy }> => {
       let device = this._devices.get(id);
       if (!device) {
         device = {};
@@ -238,15 +245,18 @@ class FakeNoble extends EventEmitter {
       if (device.proxy) {
         return Promise.resolve(device);
       }
-      return (this.onDeviceProxy?.(id) ?? Promise.resolve({})).then((proxy) => {
+      return (
+        this.onDeviceProxy?.(id) ?? Promise.resolve(this.createDeviceProxy(id))
+      ).then((proxy) => {
         device.proxy = proxy;
         return device;
       });
     },
-    _connect: (id: string): Promise<void> =>
-      this._bindings
-        ._ensureDeviceProxy(id)
-        .then(() => this.onNativeConnect?.(id) ?? Promise.resolve()),
+    _connect: async (id: string): Promise<void> => {
+      const device = await this._bindings._ensureDeviceProxy(id);
+      await this.onBeforeNativeConnect?.(id);
+      await device.proxy?.getInterface("org.bluez.Device1").Connect();
+    },
     _disconnect: (id: string): Promise<void> => {
       if (!this._devices.get(id)?.proxy) {
         return Promise.resolve();
@@ -254,6 +264,15 @@ class FakeNoble extends EventEmitter {
       return this.onNativeDisconnect?.(id) ?? Promise.resolve();
     },
   };
+
+  createDeviceProxy(id: string): FakeDbusDeviceProxy {
+    const deviceInterface = {
+      Connect: () => this.onNativeConnect?.(id) ?? Promise.resolve(),
+    };
+    return {
+      getInterface: (_name) => deviceInterface,
+    };
+  }
 
   waitForPoweredOnAsync(timeout?: number): Promise<void> {
     if (timeout !== undefined) {
@@ -1392,7 +1411,9 @@ describe("Noble Bluetooth transport", () => {
       debug: (message) => diagnostics.push(message),
     });
     await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
-    noble._devices.set(fixture.peripheral.id, { proxy: {} });
+    noble._devices.set(fixture.peripheral.id, {
+      proxy: noble.createDeviceProxy(fixture.peripheral.id),
+    });
 
     let notifyConnectionStarted!: () => void;
     const connectionStarted = new Promise<void>((resolve) => {
@@ -1601,11 +1622,11 @@ describe("Noble Bluetooth transport", () => {
     const proxyInitializationStarted = new Promise<void>((resolve) => {
       notifyProxyInitializationStarted = resolve;
     });
-    let resolveProxy!: (proxy: unknown) => void;
+    let resolveProxy!: (proxy: FakeDbusDeviceProxy) => void;
     noble.onDeviceProxy = (id) => {
       expect(id).to.equal(fixture.peripheral.id);
       notifyProxyInitializationStarted();
-      return new Promise<unknown>((resolve) => {
+      return new Promise<FakeDbusDeviceProxy>((resolve) => {
         resolveProxy = resolve;
       });
     };
@@ -1644,7 +1665,9 @@ describe("Noble Bluetooth transport", () => {
             resolve();
           }
         });
-        void noble._bindings._connect(fixture.peripheral.id);
+        void noble._bindings
+          ._connect(fixture.peripheral.id)
+          .catch((error: unknown) => fixture.peripheral.emit("connect", error));
       });
     };
     fixture.peripheral.onCancelConnect = () => {
@@ -1667,7 +1690,7 @@ describe("Noble Bluetooth transport", () => {
       expect(order).to.deep.equal(["backend.cancelConnect"]);
       expect(noble.stopped).to.equal(0);
 
-      resolveProxy({});
+      resolveProxy(noble.createDeviceProxy(fixture.peripheral.id));
       await disconnectStarted;
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(order).to.deep.equal([
@@ -1685,7 +1708,114 @@ describe("Noble Bluetooth transport", () => {
         "noble.stop",
       ]);
     } finally {
-      resolveProxy?.({});
+      resolveProxy?.(noble.createDeviceProxy(fixture.peripheral.id));
+      resolveDisconnect?.();
+      await closing?.catch(() => undefined);
+    }
+  });
+
+  it("prevents a BlueZ connect after shutdown between proxy setup and Connect", async () => {
+    const order: string[] = [];
+    const noble = new FakeNoble();
+    const fixture = makePeripheral();
+    noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
+    noble.discoverOnScan = [fixture.peripheral];
+    noble.onStop = () => order.push("noble.stop");
+
+    let notifyBeforeNativeConnect!: () => void;
+    const beforeNativeConnect = new Promise<void>((resolve) => {
+      notifyBeforeNativeConnect = resolve;
+    });
+    let resumeNativeConnect!: () => void;
+    noble.onBeforeNativeConnect = async (id) => {
+      expect(id).to.equal(fixture.peripheral.id);
+      notifyBeforeNativeConnect();
+      await new Promise<void>((resolve) => {
+        resumeNativeConnect = resolve;
+      });
+    };
+
+    let notifyDisconnectStarted!: () => void;
+    const disconnectStarted = new Promise<void>((resolve) => {
+      notifyDisconnectStarted = resolve;
+    });
+    let resolveDisconnect!: () => void;
+    noble.onNativeDisconnect = (id) => {
+      expect(id).to.equal(fixture.peripheral.id);
+      order.push("Device1.Disconnect");
+      notifyDisconnectStarted();
+      return new Promise<void>((resolve) => {
+        resolveDisconnect = resolve;
+      });
+    };
+    let connectCalls = 0;
+    noble.onNativeConnect = (id) => {
+      expect(id).to.equal(fixture.peripheral.id);
+      connectCalls++;
+      order.push("Device1.Connect");
+      return Promise.resolve();
+    };
+
+    const transport = scanner(noble, "dbus");
+    await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
+    fixture.peripheral.connectAsync = () => {
+      fixture.peripheral.connectCount++;
+      fixture.peripheral.state = "connecting";
+      return new Promise<void>((resolve, reject) => {
+        fixture.peripheral.once("connect", (error?: Error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+        void noble._bindings
+          ._connect(fixture.peripheral.id)
+          .catch((error: unknown) => fixture.peripheral.emit("connect", error));
+      });
+    };
+    fixture.peripheral.onCancelConnect = () => {
+      order.push("backend.cancelConnect");
+      void noble._bindings._disconnect(fixture.peripheral.id);
+    };
+
+    const connecting = transport.connect({ id: fixture.peripheral.id });
+    const connectionCancelled = expectRejectedWithMessage(
+      connecting,
+      "BLE scanner is closed",
+    );
+    await beforeNativeConnect;
+
+    let closing: Promise<void> | undefined;
+    try {
+      closing = transport.close();
+      await connectionCancelled;
+      await disconnectStarted;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(order).to.deep.equal([
+        "backend.cancelConnect",
+        "Device1.Disconnect",
+      ]);
+      expect(noble.stopped).to.equal(0);
+
+      resumeNativeConnect();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(connectCalls).to.equal(0);
+      expect(order).to.deep.equal([
+        "backend.cancelConnect",
+        "Device1.Disconnect",
+      ]);
+      expect(noble.stopped).to.equal(0);
+
+      resolveDisconnect();
+      await closing;
+      expect(order).to.deep.equal([
+        "backend.cancelConnect",
+        "Device1.Disconnect",
+        "noble.stop",
+      ]);
+    } finally {
+      resumeNativeConnect?.();
       resolveDisconnect?.();
       await closing?.catch(() => undefined);
     }

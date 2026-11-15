@@ -40,10 +40,17 @@ type NobleFactory = (binding?: NobleBinding) => Promise<Noble>;
 type NobleBluetoothScannerInterfaces = BluetoothScanner &
   BluetoothAdapterStatusProvider;
 type NobleBinding = "hci" | "dbus" | "mac" | "win";
-type NobleDbusDeviceInternals = { proxy?: unknown };
+type NobleDbusDeviceInterfaceInternals = {
+  Connect?: (...args: unknown[]) => Promise<unknown>;
+};
+type NobleDbusDeviceProxyInternals = {
+  getInterface?: (name: string) => NobleDbusDeviceInterfaceInternals;
+};
+type NobleDbusDeviceInternals = { proxy?: NobleDbusDeviceProxyInternals };
 type NobleDbusConnectCancellation = {
   requested: boolean;
   disconnectRequested: boolean;
+  restoreConnectGuard?: () => void;
 };
 type NobleDbusBindingsInternals = {
   _connect?: (id: string) => Promise<void>;
@@ -1404,6 +1411,9 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
               connectOperation
             ) {
               this.inFlightConnectOperations.delete(peripheral);
+              this.inFlightDbusConnectCancellations
+                .get(peripheral)
+                ?.restoreConnectGuard?.();
               this.inFlightDbusConnectCancellations.delete(peripheral);
             }
           };
@@ -1791,7 +1801,6 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     const originalEnsureDeviceProxy = bindings._ensureDeviceProxy;
     const originalDisconnect = bindings._disconnect;
     let backendConnecting: Promise<void> | undefined;
-    let cancellation: NobleDbusConnectCancellation | undefined;
     const connectDescriptor = Object.getOwnPropertyDescriptor(
       bindings,
       "_connect",
@@ -1813,20 +1822,45 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       typeof originalEnsureDeviceProxy === "function" &&
       typeof originalDisconnect === "function"
     ) {
-      cancellation = { requested: false, disconnectRequested: false };
-      this.inFlightDbusConnectCancellations.set(peripheral, cancellation);
+      const connectCancellation: NobleDbusConnectCancellation = {
+        requested: false,
+        disconnectRequested: false,
+      };
+      this.inFlightDbusConnectCancellations.set(
+        peripheral,
+        connectCancellation,
+      );
       bindings._ensureDeviceProxy = (id) => {
         const operation = originalEnsureDeviceProxy.call(bindings, id);
         if (id !== peripheral.id) {
           return operation;
         }
         return operation.then(async (device) => {
-          if (!cancellation?.requested) {
+          const deviceInterface = (
+            device as NobleDbusDeviceInternals | undefined
+          )?.proxy?.getInterface?.(BLUEZ_DEVICE_INTERFACE);
+          const originalDeviceConnect = deviceInterface?.Connect;
+          if (deviceInterface && typeof originalDeviceConnect === "function") {
+            const guardedConnect = (...args: unknown[]): Promise<unknown> => {
+              if (connectCancellation.requested) {
+                return Promise.reject(
+                  new Error("BLE connection cancelled during shutdown"),
+                );
+              }
+              return originalDeviceConnect.apply(deviceInterface, args);
+            };
+            deviceInterface.Connect = guardedConnect;
+            connectCancellation.restoreConnectGuard = () => {
+              if (deviceInterface.Connect === guardedConnect) {
+                deviceInterface.Connect = originalDeviceConnect;
+              }
+            };
+          }
+          if (!connectCancellation.requested) {
             return device;
           }
-          // Reject _connect so it cannot call Device1.Connect after shutdown.
-          if (!cancellation.disconnectRequested) {
-            cancellation.disconnectRequested = true;
+          if (!connectCancellation.disconnectRequested) {
+            connectCancellation.disconnectRequested = true;
             await originalDisconnect.call(bindings, id);
           }
           throw new Error("BLE connection cancelled during shutdown");
