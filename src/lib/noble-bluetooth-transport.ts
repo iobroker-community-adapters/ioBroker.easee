@@ -41,6 +41,7 @@ type NobleBluetoothScannerInterfaces = BluetoothScanner &
   BluetoothAdapterStatusProvider;
 type NobleBinding = "hci" | "dbus" | "mac" | "win";
 type NobleDbusBindingsInternals = {
+  _connect?: (id: string) => Promise<void>;
   _disconnect?: (id: string) => Promise<void>;
 };
 type NobleWithDbusBindingsInternals = Noble & {
@@ -1375,14 +1376,26 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           "started",
         );
         try {
-          const connecting = peripheral.connectAsync();
-          this.inFlightConnectOperations.set(peripheral, connecting);
+          const { connecting, backendConnecting } =
+            this.connectPeripheralAndCaptureBackend(peripheral);
+          const connectOperation = backendConnecting
+            ? Promise.allSettled([connecting, backendConnecting]).then(
+                () => undefined,
+              )
+            : connecting.then(
+                () => undefined,
+                () => undefined,
+              );
+          this.inFlightConnectOperations.set(peripheral, connectOperation);
           const removeConnectOperation = (): void => {
-            if (this.inFlightConnectOperations.get(peripheral) === connecting) {
+            if (
+              this.inFlightConnectOperations.get(peripheral) ===
+              connectOperation
+            ) {
               this.inFlightConnectOperations.delete(peripheral);
             }
           };
-          void connecting.then(() => {
+          void connectOperation.then(() => {
             removeConnectOperation();
             if (this.closed && isPeripheralConnected(peripheral)) {
               void this.disconnectPeripheralOnce(peripheral).catch(
@@ -1746,6 +1759,47 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       cleanupOperations.push(this.disconnectPeripheralDuringClose(peripheral));
     }
     return cleanupOperations;
+  }
+
+  // Noble drops the D-Bus `_connect()` promise, which can outlive cancellation.
+  private connectPeripheralAndCaptureBackend(peripheral: Peripheral): {
+    connecting: Promise<void>;
+    backendConnecting?: Promise<void>;
+  } {
+    if (this.binding !== "dbus") {
+      return { connecting: peripheral.connectAsync() };
+    }
+
+    const bindings = (this.noble as NobleWithDbusBindingsInternals)._bindings;
+    const originalConnect = bindings?._connect;
+    if (!bindings || typeof originalConnect !== "function") {
+      return { connecting: peripheral.connectAsync() };
+    }
+
+    let backendConnecting: Promise<void> | undefined;
+    const connectDescriptor = Object.getOwnPropertyDescriptor(
+      bindings,
+      "_connect",
+    );
+    bindings._connect = (id) => {
+      const operation = originalConnect.call(bindings, id);
+      if (id === peripheral.id) {
+        backendConnecting = operation;
+      }
+      return operation;
+    };
+    try {
+      const connecting = peripheral.connectAsync();
+      return backendConnecting
+        ? { connecting, backendConnecting }
+        : { connecting };
+    } finally {
+      if (connectDescriptor) {
+        Object.defineProperty(bindings, "_connect", connectDescriptor);
+      } else {
+        delete bindings._connect;
+      }
+    }
   }
 
   private cancelConnectAndWaitForBackendDisconnect(

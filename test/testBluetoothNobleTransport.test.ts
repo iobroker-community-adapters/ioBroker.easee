@@ -223,8 +223,11 @@ class FakeNoble extends EventEmitter {
   onScanStop?: () => void;
   discoverOnScan: FakePeripheral[] = [];
   peripherals = new Map<string, FakePeripheral>();
+  onNativeConnect?: (id: string) => Promise<void>;
   onNativeDisconnect?: (id: string) => Promise<void>;
   readonly _bindings = {
+    _connect: (id: string): Promise<void> =>
+      this.onNativeConnect?.(id) ?? Promise.resolve(),
     _disconnect: (id: string): Promise<void> =>
       this.onNativeDisconnect?.(id) ?? Promise.resolve(),
   };
@@ -1450,34 +1453,50 @@ describe("Noble Bluetooth transport", () => {
     }
   });
 
-  it("waits for a late successful connection to disconnect before stopping Noble", async () => {
+  it("waits for a late BlueZ connect event after Noble cancels connectAsync", async () => {
     const order: string[] = [];
     const noble = new FakeNoble();
     const fixture = makePeripheral();
     noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
     noble.discoverOnScan = [fixture.peripheral];
     noble.onStop = () => order.push("noble.stop");
-    const transport = scanner(noble);
+    const transport = scanner(noble, "dbus");
     await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
 
     let notifyConnectionStarted!: () => void;
     const connectionStarted = new Promise<void>((resolve) => {
       notifyConnectionStarted = resolve;
     });
-    let resolveConnection!: () => void;
+    let notifyBackendConnectStarted!: () => void;
+    const backendConnectStarted = new Promise<void>((resolve) => {
+      notifyBackendConnectStarted = resolve;
+    });
+    let resolveBackendConnect!: () => void;
+    noble.onNativeConnect = (id) => {
+      expect(id).to.equal(fixture.peripheral.id);
+      notifyBackendConnectStarted();
+      return new Promise<void>((resolve) => {
+        resolveBackendConnect = resolve;
+      });
+    };
     fixture.peripheral.connectAsync = () => {
       fixture.peripheral.connectCount++;
       fixture.peripheral.state = "connecting";
       notifyConnectionStarted();
-      return new Promise<void>((resolve) => {
-        resolveConnection = () => {
-          fixture.peripheral.state = "connected";
-          resolve();
-        };
+      return new Promise<void>((resolve, reject) => {
+        fixture.peripheral.once("connect", (error?: Error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+        void noble._bindings._connect(fixture.peripheral.id);
       });
     };
     fixture.peripheral.onCancelConnect = () => {
       order.push("backend.cancelConnect");
+      void noble._bindings._disconnect(fixture.peripheral.id);
     };
 
     let notifyDisconnectStarted!: () => void;
@@ -1504,18 +1523,27 @@ describe("Noble Bluetooth transport", () => {
       "BLE scanner is closed",
     );
     await connectionStarted;
+    await backendConnectStarted;
 
     let closing: Promise<void> | undefined;
     try {
       closing = transport.close();
+      await connectionCancelled;
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(order).to.deep.equal(["backend.cancelConnect"]);
+      expect(fixture.peripheral.state).to.equal("disconnected");
       expect(noble.stopped).to.equal(0);
 
-      resolveConnection();
+      // Noble can emit a later success after connectAsync was canceled.
+      fixture.peripheral.state = "connected";
+      order.push("late.connect");
+      fixture.peripheral.emit("connect");
+      resolveBackendConnect();
       await disconnectStarted;
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(order).to.deep.equal([
         "backend.cancelConnect",
+        "late.connect",
         "peripheral.disconnect",
       ]);
       expect(fixture.peripheral.state).to.equal("disconnecting");
@@ -1523,15 +1551,15 @@ describe("Noble Bluetooth transport", () => {
 
       resolveDisconnect();
       await closing;
-      await connectionCancelled;
       expect(order).to.deep.equal([
         "backend.cancelConnect",
+        "late.connect",
         "peripheral.disconnect",
         "noble.stop",
       ]);
       expect(fixture.peripheral.disconnectCount).to.equal(1);
     } finally {
-      resolveConnection?.();
+      resolveBackendConnect?.();
       resolveDisconnect?.();
       await closing?.catch(() => undefined);
     }
