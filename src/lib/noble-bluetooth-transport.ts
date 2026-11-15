@@ -1727,7 +1727,10 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
         }
         if (backendDisconnect) {
           cleanupOperations.push(
-            this.trackDisconnectDuringClose(backendDisconnect),
+            this.trackDisconnectDuringClose(
+              backendDisconnect,
+              "cleanup_finished",
+            ),
           );
         }
         if (connectionSettled) {
@@ -1789,11 +1792,13 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
   ): Promise<void> {
     return this.trackDisconnectDuringClose(
       this.disconnectPeripheralOnce(peripheral),
+      "cleanup_completed",
     );
   }
 
   private trackDisconnectDuringClose(
     disconnecting: Promise<void>,
+    completionState: "cleanup_completed" | "cleanup_finished",
   ): Promise<void> {
     const cleanupStartedAt = bluetoothDiagnosticNow();
     logBluetoothDiagnostic(
@@ -1806,7 +1811,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
         logBluetoothDiagnostic(
           this.diagnosticLogger,
           "transport.disconnect",
-          "cleanup_completed",
+          completionState,
           {
             durationMs: bluetoothDiagnosticNow() - cleanupStartedAt,
           },

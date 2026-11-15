@@ -1355,12 +1355,15 @@ describe("Noble Bluetooth transport", () => {
 
   it("waits for the BlueZ disconnect call after canceling an unresolved connection", async () => {
     const order: string[] = [];
+    const diagnostics: string[] = [];
     const noble = new FakeNoble();
     const fixture = makePeripheral();
     noble.peripherals.set(fixture.peripheral.id, fixture.peripheral);
     noble.discoverOnScan = [fixture.peripheral];
     noble.onStop = () => order.push("noble.stop");
-    const transport = scanner(noble, "dbus");
+    const transport = scanner(noble, "dbus", {
+      debug: (message) => diagnostics.push(message),
+    });
     await transport.discover(BLUETOOTH_SERVICE_UUID, 20);
 
     let notifyConnectionStarted!: () => void;
@@ -1435,6 +1438,11 @@ describe("Noble Bluetooth transport", () => {
       expect(fixture.peripheral.cancelConnectCount).to.equal(1);
       expect(fixture.peripheral.disconnectCount).to.equal(0);
       expect(fixture.peripheral.state).to.equal("disconnected");
+      const output = diagnostics.join("\n");
+      expect(output).to.include(
+        "stage=transport.disconnect state=cleanup_finished",
+      );
+      expect(output).not.to.include("state=cleanup_completed");
     } finally {
       resolveDisconnect?.();
       await closing?.catch(() => undefined);
