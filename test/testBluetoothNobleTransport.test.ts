@@ -1419,6 +1419,18 @@ describe("Noble Bluetooth transport", () => {
     const connectionStarted = new Promise<void>((resolve) => {
       notifyConnectionStarted = resolve;
     });
+    let notifyNativeConnectStarted!: () => void;
+    const nativeConnectStarted = new Promise<void>((resolve) => {
+      notifyNativeConnectStarted = resolve;
+    });
+    let connectCalls = 0;
+    noble.onNativeConnect = (id) => {
+      expect(id).to.equal(fixture.peripheral.id);
+      connectCalls++;
+      order.push("Device1.Connect");
+      notifyNativeConnectStarted();
+      return Promise.resolve();
+    };
     fixture.peripheral.connectAsync = () => {
       // Noble stays connecting while BlueZ reports Connected but not ServicesResolved.
       fixture.peripheral.connectCount++;
@@ -1432,6 +1444,9 @@ describe("Noble Bluetooth transport", () => {
             resolve();
           }
         });
+        void noble._bindings
+          ._connect(fixture.peripheral.id)
+          .catch((error: unknown) => fixture.peripheral.emit("connect", error));
       });
     };
 
@@ -1461,6 +1476,8 @@ describe("Noble Bluetooth transport", () => {
       "BLE scanner is closed",
     );
     await connectionStarted;
+    await nativeConnectStarted;
+    expect(connectCalls).to.equal(1);
     expect(fixture.peripheral.state).to.equal("connecting");
 
     let closing: Promise<void> | undefined;
@@ -1471,6 +1488,7 @@ describe("Noble Bluetooth transport", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       expect(order).to.deep.equal([
+        "Device1.Connect",
         "backend.cancelConnect",
         "Device1.Disconnect",
       ]);
@@ -1480,6 +1498,7 @@ describe("Noble Bluetooth transport", () => {
       resolveDisconnect();
       await closing;
       expect(order).to.deep.equal([
+        "Device1.Connect",
         "backend.cancelConnect",
         "Device1.Disconnect",
         "noble.stop",
@@ -1610,7 +1629,7 @@ describe("Noble Bluetooth transport", () => {
     }
   });
 
-  it("cancels a BlueZ connection when its proxy initializes during shutdown", async () => {
+  it("does not disconnect a BlueZ device when canceled before proxy initialization", async () => {
     const order: string[] = [];
     const noble = new FakeNoble();
     const fixture = makePeripheral();
@@ -1631,18 +1650,12 @@ describe("Noble Bluetooth transport", () => {
       });
     };
 
-    let notifyDisconnectStarted!: () => void;
-    const disconnectStarted = new Promise<void>((resolve) => {
-      notifyDisconnectStarted = resolve;
-    });
-    let resolveDisconnect!: () => void;
+    let disconnectCalls = 0;
     noble.onNativeDisconnect = (id) => {
       expect(id).to.equal(fixture.peripheral.id);
+      disconnectCalls++;
       order.push("Device1.Disconnect");
-      notifyDisconnectStarted();
-      return new Promise<void>((resolve) => {
-        resolveDisconnect = resolve;
-      });
+      return Promise.resolve();
     };
     let connectCalls = 0;
     noble.onNativeConnect = (id) => {
@@ -1698,30 +1711,18 @@ describe("Noble Bluetooth transport", () => {
       expect(noble.stopped).to.equal(0);
 
       resolveProxy(noble.createDeviceProxy(fixture.peripheral.id));
-      await disconnectStarted;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(order).to.deep.equal([
-        "backend.cancelConnect",
-        "Device1.Disconnect",
-      ]);
-      expect(connectCalls).to.equal(0);
-      expect(noble.stopped).to.equal(0);
-
-      resolveDisconnect();
       await closing;
-      expect(order).to.deep.equal([
-        "backend.cancelConnect",
-        "Device1.Disconnect",
-        "noble.stop",
-      ]);
+      expect(order).to.deep.equal(["backend.cancelConnect", "noble.stop"]);
+      expect(connectCalls).to.equal(0);
+      expect(disconnectCalls).to.equal(0);
+      expect(noble.stopped).to.equal(1);
     } finally {
       resolveProxy?.(noble.createDeviceProxy(fixture.peripheral.id));
-      resolveDisconnect?.();
       await closing?.catch(() => undefined);
     }
   });
 
-  it("prevents a BlueZ connect after shutdown between proxy setup and Connect", async () => {
+  it("does not disconnect a BlueZ device when shutdown wins before Connect", async () => {
     const order: string[] = [];
     const noble = new FakeNoble();
     const fixture = makePeripheral();
@@ -1742,18 +1743,12 @@ describe("Noble Bluetooth transport", () => {
       });
     };
 
-    let notifyDisconnectStarted!: () => void;
-    const disconnectStarted = new Promise<void>((resolve) => {
-      notifyDisconnectStarted = resolve;
-    });
-    let resolveDisconnect!: () => void;
+    let disconnectCalls = 0;
     noble.onNativeDisconnect = (id) => {
       expect(id).to.equal(fixture.peripheral.id);
+      disconnectCalls++;
       order.push("Device1.Disconnect");
-      notifyDisconnectStarted();
-      return new Promise<void>((resolve) => {
-        resolveDisconnect = resolve;
-      });
+      return Promise.resolve();
     };
     let connectCalls = 0;
     noble.onNativeConnect = (id) => {
@@ -1797,33 +1792,18 @@ describe("Noble Bluetooth transport", () => {
     try {
       closing = transport.close();
       await connectionCancelled;
-      await disconnectStarted;
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(order).to.deep.equal([
-        "backend.cancelConnect",
-        "Device1.Disconnect",
-      ]);
+      expect(order).to.deep.equal(["backend.cancelConnect"]);
       expect(noble.stopped).to.equal(0);
 
       resumeNativeConnect();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(connectCalls).to.equal(0);
-      expect(order).to.deep.equal([
-        "backend.cancelConnect",
-        "Device1.Disconnect",
-      ]);
-      expect(noble.stopped).to.equal(0);
-
-      resolveDisconnect();
       await closing;
-      expect(order).to.deep.equal([
-        "backend.cancelConnect",
-        "Device1.Disconnect",
-        "noble.stop",
-      ]);
+      expect(connectCalls).to.equal(0);
+      expect(disconnectCalls).to.equal(0);
+      expect(order).to.deep.equal(["backend.cancelConnect", "noble.stop"]);
+      expect(noble.stopped).to.equal(1);
     } finally {
       resumeNativeConnect?.();
-      resolveDisconnect?.();
       await closing?.catch(() => undefined);
     }
   });

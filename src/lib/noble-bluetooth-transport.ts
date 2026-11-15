@@ -49,6 +49,7 @@ type NobleDbusDeviceProxyInternals = {
 type NobleDbusDeviceInternals = { proxy?: NobleDbusDeviceProxyInternals };
 type NobleDbusConnectCancellation = {
   requested: boolean;
+  connectDispatched: boolean;
   disconnectRequested: boolean;
   restoreConnectGuard?: () => void;
 };
@@ -1990,6 +1991,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     ) {
       const connectCancellation: NobleDbusConnectCancellation = {
         requested: false,
+        connectDispatched: false,
         disconnectRequested: false,
       };
       this.inFlightDbusConnectCancellations.set(
@@ -2013,6 +2015,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
                   new Error("BLE connection cancelled during shutdown"),
                 );
               }
+              connectCancellation.connectDispatched = true;
               return originalDeviceConnect.apply(deviceInterface, args);
             };
             deviceInterface.Connect = guardedConnect;
@@ -2025,7 +2028,11 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           if (!connectCancellation.requested) {
             return device;
           }
-          if (!connectCancellation.disconnectRequested) {
+          if (
+            (connectCancellation.connectDispatched ||
+              isPeripheralConnected(peripheral)) &&
+            !connectCancellation.disconnectRequested
+          ) {
             connectCancellation.disconnectRequested = true;
             await originalDisconnect.call(bindings, id);
           }
@@ -2082,6 +2089,14 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       "_disconnect",
     );
     bindings._disconnect = (id) => {
+      if (
+        id === peripheral.id &&
+        cancellation &&
+        !cancellation.connectDispatched &&
+        !isPeripheralConnected(peripheral)
+      ) {
+        return Promise.resolve();
+      }
       const operation = originalDisconnect.call(bindings, id);
       if (id === peripheral.id) {
         backendDisconnect = operation;
