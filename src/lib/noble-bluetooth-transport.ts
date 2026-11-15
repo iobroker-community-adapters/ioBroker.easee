@@ -40,9 +40,16 @@ type NobleFactory = (binding?: NobleBinding) => Promise<Noble>;
 type NobleBluetoothScannerInterfaces = BluetoothScanner &
   BluetoothAdapterStatusProvider;
 type NobleBinding = "hci" | "dbus" | "mac" | "win";
+type NobleDbusDeviceInternals = { proxy?: unknown };
+type NobleDbusConnectCancellation = {
+  requested: boolean;
+  disconnectRequested: boolean;
+};
 type NobleDbusBindingsInternals = {
   _connect?: (id: string) => Promise<void>;
+  _devices?: Map<string, NobleDbusDeviceInternals>;
   _disconnect?: (id: string) => Promise<void>;
+  _ensureDeviceProxy?: (id: string) => Promise<unknown>;
 };
 type NobleWithDbusBindingsInternals = Noble & {
   _bindings?: NobleDbusBindingsInternals;
@@ -1025,6 +1032,10 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     Peripheral,
     Promise<void>
   >();
+  private readonly inFlightDbusConnectCancellations = new WeakMap<
+    Peripheral,
+    NobleDbusConnectCancellation
+  >();
   private readonly peripheralDisconnectOperations = new WeakMap<
     Peripheral,
     Promise<void>
@@ -1393,6 +1404,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
               connectOperation
             ) {
               this.inFlightConnectOperations.delete(peripheral);
+              this.inFlightDbusConnectCancellations.delete(peripheral);
             }
           };
           void connectOperation.then(() => {
@@ -1771,23 +1783,56 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     }
 
     const bindings = (this.noble as NobleWithDbusBindingsInternals)._bindings;
-    const originalConnect = bindings?._connect;
-    if (!bindings || typeof originalConnect !== "function") {
+    if (!bindings) {
       return { connecting: peripheral.connectAsync() };
     }
 
+    const originalConnect = bindings._connect;
+    const originalEnsureDeviceProxy = bindings._ensureDeviceProxy;
+    const originalDisconnect = bindings._disconnect;
     let backendConnecting: Promise<void> | undefined;
+    let cancellation: NobleDbusConnectCancellation | undefined;
     const connectDescriptor = Object.getOwnPropertyDescriptor(
       bindings,
       "_connect",
     );
-    bindings._connect = (id) => {
-      const operation = originalConnect.call(bindings, id);
-      if (id === peripheral.id) {
-        backendConnecting = operation;
-      }
-      return operation;
-    };
+    const ensureProxyDescriptor = Object.getOwnPropertyDescriptor(
+      bindings,
+      "_ensureDeviceProxy",
+    );
+    if (typeof originalConnect === "function") {
+      bindings._connect = (id) => {
+        const operation = originalConnect.call(bindings, id);
+        if (id === peripheral.id) {
+          backendConnecting = operation;
+        }
+        return operation;
+      };
+    }
+    if (
+      typeof originalEnsureDeviceProxy === "function" &&
+      typeof originalDisconnect === "function"
+    ) {
+      cancellation = { requested: false, disconnectRequested: false };
+      this.inFlightDbusConnectCancellations.set(peripheral, cancellation);
+      bindings._ensureDeviceProxy = (id) => {
+        const operation = originalEnsureDeviceProxy.call(bindings, id);
+        if (id !== peripheral.id) {
+          return operation;
+        }
+        return operation.then(async (device) => {
+          if (!cancellation?.requested) {
+            return device;
+          }
+          // Reject _connect so it cannot call Device1.Connect after shutdown.
+          if (!cancellation.disconnectRequested) {
+            cancellation.disconnectRequested = true;
+            await originalDisconnect.call(bindings, id);
+          }
+          throw new Error("BLE connection cancelled during shutdown");
+        });
+      };
+    }
     try {
       const connecting = peripheral.connectAsync();
       return backendConnecting
@@ -1796,8 +1841,17 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     } finally {
       if (connectDescriptor) {
         Object.defineProperty(bindings, "_connect", connectDescriptor);
-      } else {
+      } else if (typeof originalConnect === "function") {
         delete bindings._connect;
+      }
+      if (ensureProxyDescriptor) {
+        Object.defineProperty(
+          bindings,
+          "_ensureDeviceProxy",
+          ensureProxyDescriptor,
+        );
+      } else if (typeof originalEnsureDeviceProxy === "function") {
+        delete bindings._ensureDeviceProxy;
       }
     }
   }
@@ -1818,6 +1872,10 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       return undefined;
     }
 
+    const cancellation = this.inFlightDbusConnectCancellations.get(peripheral);
+    if (cancellation) {
+      cancellation.requested = true;
+    }
     let backendDisconnect: Promise<void> | undefined;
     const disconnectDescriptor = Object.getOwnPropertyDescriptor(
       bindings,
@@ -1827,6 +1885,9 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       const operation = originalDisconnect.call(bindings, id);
       if (id === peripheral.id) {
         backendDisconnect = operation;
+        if (bindings._devices?.get(id)?.proxy && cancellation) {
+          cancellation.disconnectRequested = true;
+        }
       }
       return operation;
     };
