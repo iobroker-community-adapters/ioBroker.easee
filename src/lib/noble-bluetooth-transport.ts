@@ -39,6 +39,12 @@ type NobleFactory = (binding?: NobleBinding) => Promise<Noble>;
 type NobleBluetoothScannerInterfaces = BluetoothScanner &
   BluetoothAdapterStatusProvider;
 type NobleBinding = "hci" | "dbus" | "mac" | "win";
+type NobleDbusBindingsInternals = {
+  _disconnect?: (id: string) => Promise<void>;
+};
+type NobleWithDbusBindingsInternals = Noble & {
+  _bindings?: NobleDbusBindingsInternals;
+};
 
 const NOBLE_BINDINGS = new Set(["hci", "dbus", "mac", "win"]);
 const requireFromAdapter = createRequire(__filename);
@@ -1707,14 +1713,21 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
           "transport.link_connect",
           "cancel_started",
         );
+        let backendDisconnect: Promise<void> | undefined;
         try {
-          peripheral.cancelConnect();
+          backendDisconnect =
+            this.cancelConnectAndWaitForBackendDisconnect(peripheral);
         } catch (error) {
           logBluetoothDiagnostic(
             this.diagnosticLogger,
             "transport.link_connect",
             "cancel_failed",
             { error },
+          );
+        }
+        if (backendDisconnect) {
+          cleanupOperations.push(
+            this.trackDisconnectDuringClose(backendDisconnect),
           );
         }
         if (connectionSettled) {
@@ -1731,8 +1744,56 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
     return cleanupOperations;
   }
 
+  private cancelConnectAndWaitForBackendDisconnect(
+    peripheral: Peripheral,
+  ): Promise<void> | undefined {
+    if (this.binding !== "dbus") {
+      peripheral.cancelConnect();
+      return undefined;
+    }
+
+    // Noble's D-Bus cancelConnect drops the Promise returned by _disconnect.
+    const bindings = (this.noble as NobleWithDbusBindingsInternals)._bindings;
+    const originalDisconnect = bindings?._disconnect;
+    if (!bindings || typeof originalDisconnect !== "function") {
+      peripheral.cancelConnect();
+      return undefined;
+    }
+
+    let backendDisconnect: Promise<void> | undefined;
+    const disconnectDescriptor = Object.getOwnPropertyDescriptor(
+      bindings,
+      "_disconnect",
+    );
+    bindings._disconnect = (id) => {
+      const operation = originalDisconnect.call(bindings, id);
+      if (id === peripheral.id) {
+        backendDisconnect = operation;
+      }
+      return operation;
+    };
+    try {
+      peripheral.cancelConnect();
+    } finally {
+      if (disconnectDescriptor) {
+        Object.defineProperty(bindings, "_disconnect", disconnectDescriptor);
+      } else {
+        delete bindings._disconnect;
+      }
+    }
+    return backendDisconnect;
+  }
+
   private disconnectPeripheralDuringClose(
     peripheral: Peripheral,
+  ): Promise<void> {
+    return this.trackDisconnectDuringClose(
+      this.disconnectPeripheralOnce(peripheral),
+    );
+  }
+
+  private trackDisconnectDuringClose(
+    disconnecting: Promise<void>,
   ): Promise<void> {
     const cleanupStartedAt = bluetoothDiagnosticNow();
     logBluetoothDiagnostic(
@@ -1740,7 +1801,7 @@ export class NobleBluetoothScanner implements NobleBluetoothScannerInterfaces {
       "transport.disconnect",
       "cleanup_started",
     );
-    return this.disconnectPeripheralOnce(peripheral).then(
+    return disconnecting.then(
       () => {
         logBluetoothDiagnostic(
           this.diagnosticLogger,
