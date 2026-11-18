@@ -4781,6 +4781,16 @@ class Easee extends Adapter {
       common: { name: "Easee charger" },
       native: {},
     });
+    await this.extendObjectAsync(charger.id, {
+      common: {
+        statusStates: {
+          onlineId:
+            this.connectionMode === "bluetooth"
+              ? "info.bluetoothConnection"
+              : "status.isOnline",
+        },
+      },
+    });
     for (const [id, name] of [
       ["control", "Controls"],
       ["status", "Status"],

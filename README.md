@@ -49,7 +49,10 @@ modes. For setup, compatibility, and troubleshooting, see the
 
 ### Charger status and controls
 
-`<chargerId>.status.chargerOpMode` shows the current charging state:
+`<chargerId>.status.chargerOpMode` shows the current charging state. The Admin
+object browser marks chargers online or offline using
+`<chargerId>.status.isOnline` in Cloud mode or
+`<chargerId>.info.bluetoothConnection` in Bluetooth mode.
 
 | Value | State |
 | ---: | --- |
@@ -89,6 +92,7 @@ This adapter would not have been possible without the great work of @Newan (http
   ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+- (Voodoo2man) Added online/offline indicators for chargers in the Admin object browser.
 - (Voodoo2man) Improved cleanup of Bluetooth connections that complete while the adapter shuts down.
 
 ### 4.0.1 (2026-11-15)

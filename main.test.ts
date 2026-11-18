@@ -2687,6 +2687,67 @@ describe("Easee polling regressions", () => {
     });
   });
 
+  describe("charger device status indicators", () => {
+    afterEach(() => sinon.restore());
+
+    for (const { mode, onlineId } of [
+      { mode: "cloud", onlineId: "status.isOnline" },
+      { mode: "bluetooth", onlineId: "info.bluetoothConnection" },
+    ] as const) {
+      it(`updates the ${mode} indicator on existing charger devices`, async () => {
+        const adapter = createAdapterHarness();
+        adapter.connectionMode = mode;
+        adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+
+        const existingDevice = {
+          common: {
+            name: "Customized charger",
+            statusStates: {
+              offlineId: "status.offline",
+              errorId: "status.error",
+            },
+            customInfo: "preserve",
+          } as Record<string, unknown>,
+          native: { preserve: true },
+        };
+        const extendObjectAsync = sinon.stub().callsFake((_id, patch) => {
+          const commonPatch = patch.common as Record<string, unknown>;
+          existingDevice.common = {
+            ...existingDevice.common,
+            ...commonPatch,
+            statusStates: {
+              ...(existingDevice.common.statusStates as Record<
+                string,
+                unknown
+              >),
+              ...(commonPatch.statusStates as Record<string, unknown>),
+            },
+          };
+          return Promise.resolve();
+        });
+        adapter.extendObjectAsync = extendObjectAsync;
+
+        await adapter.ensureChargerObjectStructure({ id: "charger" });
+
+        expect(
+          extendObjectAsync.calledOnceWithExactly("charger", {
+            common: { statusStates: { onlineId } },
+          }),
+        ).to.equal(true);
+        expect(existingDevice.common).to.deep.equal({
+          name: "Customized charger",
+          statusStates: {
+            offlineId: "status.offline",
+            errorId: "status.error",
+            onlineId,
+          },
+          customInfo: "preserve",
+        });
+        expect(existingDevice.native).to.deep.equal({ preserve: true });
+      });
+    }
+  });
+
   describe("Connection-mode datapoints", () => {
     afterEach(() => sinon.restore());
 
