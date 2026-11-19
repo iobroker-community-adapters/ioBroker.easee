@@ -82,6 +82,12 @@ Cloud session polling is automatic by default. You can set a separate interval
 per charger in Admin; very short intervals are adjusted to avoid excessive
 requests.
 
+### Messages for scripts and AI agents
+
+`sendTo("easee.0", "help", {})` answers a description of the adapter for AI
+agents (e.g. pi-agent) and script authors: `{ help, commands }`, where
+`commands` lists every message with `write: true` if it changes something.
+
 ## Credits
 
 This adapter would not have been possible without the great work of @Newan (https://github.com/Newan), who developed former releases of this adapter.
@@ -91,6 +97,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (@GermanBluefox) Added the message "help": a description of all messages for AI agents (e.g. pi-agent), and common.supportedMessages.help
+
 ### 4.1.0 (2026-11-19)
 - (Voodoo2man) Added online/offline indicators for chargers in the Admin object browser.
 - (Voodoo2man) Improved cleanup of Bluetooth connections that complete while the adapter shuts down.

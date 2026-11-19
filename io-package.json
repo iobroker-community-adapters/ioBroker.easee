@@ -3,7 +3,8 @@
     "name": "easee",
     "supportedMessages": {
       "custom": true,
-      "deviceManager": true
+      "deviceManager": true,
+      "help": true
     },
     "nogit": true,
     "version": "4.1.0",
