@@ -25,6 +25,7 @@ import {
   supportsConnectionMode,
 } from "./lib/charger-state-definitions.ts";
 import { deriveBluetoothSearchReadiness } from "./lib/bluetooth-readiness.ts";
+import { COMMANDS, HELP } from "./lib/help.ts";
 import type {
   BluetoothAdapterState,
   BluetoothAdapterStatusProvider,
@@ -1440,6 +1441,15 @@ class Easee extends Adapter {
 
   onMessage(message: ioBroker.Message): void {
     if (!message?.callback) {
+      return;
+    }
+    if (message.command === "help") {
+      this.sendTo(
+        message.from,
+        message.command,
+        { help: HELP, commands: COMMANDS },
+        message.callback,
+      );
       return;
     }
     if (message.command === "bluetoothScan") {
