@@ -97,7 +97,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 4.1.1 (2026-11-22)
 - (@GermanBluefox) Added the message "help": a description of all messages for AI agents (e.g. pi-agent), and common.supportedMessages.help
 
 ### 4.1.0 (2026-11-19)
@@ -116,11 +116,6 @@ This adapter would not have been possible without the great work of @Newan (http
 - (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
 - (Voodoo2man) Replaced the adapter icon.
 - (Voodoo2man) Added an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.
-
-### 3.1.0 (2026-11-01)
-- (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
-- (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.
-- (Voodoo2man) Improved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 

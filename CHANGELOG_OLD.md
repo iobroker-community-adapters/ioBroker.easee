@@ -1,4 +1,9 @@
 # Older changes
+## 3.1.0 (2026-11-01)
+- (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
+- (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.
+- (Voodoo2man) Improved recovery of live charger updates after connection interruptions while retaining regular status updates when live updates are disabled.
+
 ## 3.0.0 (2026-10-23)
 - (Voodoo2man) Raised the minimum Node.js version to 22.19.0.
 
