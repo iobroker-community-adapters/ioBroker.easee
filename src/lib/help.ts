@@ -4,9 +4,23 @@
  * manager (@iobroker/dm-utils).
  */
 
-/** Every command the instance answers; write = the command changes something */
-export const COMMANDS: { command: string; write: boolean }[] = [
+/**
+ * Every command the instance answers; write = the command changes something; standard = the command of the shared
+ * catalog of sendTo commands (family.command) it follows
+ */
+export const COMMANDS: {
+  command: string;
+  write: boolean;
+  standard?: string;
+}[] = [
   { command: "help", write: false },
+  { command: "getVehicles", write: false, standard: "vehicle.getVehicles" },
+  { command: "charge", write: true, standard: "vehicle.charge" },
+  {
+    command: "setChargeCurrent",
+    write: true,
+    standard: "vehicle.setChargeCurrent",
+  },
   { command: "bluetoothScan", write: true },
   { command: "dm:instanceInfo", write: false },
   { command: "dm:loadDevices", write: false },
@@ -23,10 +37,20 @@ export const COMMANDS: { command: string; write: boolean }[] = [
 
 export const HELP = `ioBroker.easee: connects Easee wallboxes (chargers) through the Easee Cloud or locally by Bluetooth (setting
 "connection mode"). Every charger is the device easee.0.<chargerId> (its serial number, e.g. EH123456) with the
-channels status, config and control. An agent reads and controls charging through these states (write them with
-ack false); the messages only serve the settings.
+channels status, config and control. An agent reads the charger through these states and controls charging with
+the standard commands below (they follow the shared catalog of the vehicle family, where a wallbox counts as a
+vehicle, and answer whether it worked) or by writing the states (ack false, no answer).
 
-Commands (sendTo easee.0):
+Commands (sendTo easee.0), standard commands of the shared catalog (vehicle = serial number or name of the charger,
+compared without case; default the only charger; errors {error, reason: NOT_FOUND | AMBIGUOUS (with candidates) |
+BAD_REQUEST | NOT_CONNECTED | BUSY (a Bluetooth search runs) | COMMAND_FAILED}; a write answers {ok: true} when the
+Cloud or the charger confirmed it, or {ok: true, pending: true} after 14 s while it goes on):
+- getVehicles {}: {vehicles: [{id: serial number, name, kind: "wallbox"}]}.
+- charge {vehicle?, on: true | false}: on resumes a paused charger (status.chargerOpMode 4; by Bluetooth always
+  resume, see control.resume) or starts charging (control.start, Cloud); off pauses (control.pause, can be resumed).
+- setChargeCurrent {vehicle?, amps}: sets config.dynamicChargerCurrent (A, the current limit now; 0 = no charging;
+  by Bluetooth whole amperes).
+Commands for the settings:
 - bluetoothScan {}: starts the manual Bluetooth search of the settings: {result: "completed"} or {error:
   "unavailable", "notReady", "busy" or "failed"}; for the settings, not for agents.
 - dm:instanceInfo, dm:loadDevices, dm:deviceInfo, dm:deviceStatus, dm:deviceDetails, dm:instanceAction,
@@ -53,6 +77,6 @@ false), by Bluetooth also written to info.bluetoothError.
 How to talk to the user:
 - Name the charger by its name (easee.0.<chargerId>.name), not by its serial number; if there are several, ask which.
 - Before starting say what the charger reports (status.chargerOpMode): a car must be connected.
-- control.* and config.* change the charger: only on the user's request; control.reboot, config.isEnabled false,
-  config.lockCablePermanently and the circuit currents only on the user's explicit request.
+- charge, setChargeCurrent, control.* and config.* change the charger: only on the user's request; control.reboot,
+  config.isEnabled false, config.lockCablePermanently and the circuit currents only on the user's explicit request.
 - Name currents in A and power in kW; times in local time.`;

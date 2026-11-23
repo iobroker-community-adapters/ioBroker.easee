@@ -26,6 +26,8 @@ import {
 } from "./lib/charger-state-definitions.ts";
 import { deriveBluetoothSearchReadiness } from "./lib/bluetooth-readiness.ts";
 import { COMMANDS, HELP } from "./lib/help.ts";
+import { handleStandardCommand, STANDARD_COMMANDS } from "./lib/standard.ts";
+import type { StandardTarget } from "./lib/standard.ts";
 import type {
   BluetoothAdapterState,
   BluetoothAdapterStatusProvider,
@@ -1440,6 +1442,22 @@ class Easee extends Adapter {
   }
 
   onMessage(message: ioBroker.Message): void {
+    // the standard commands of the shared catalog (vehicle.*), src/lib/standard.ts; they also run without a callback
+    if (
+      message &&
+      Object.prototype.hasOwnProperty.call(STANDARD_COMMANDS, message.command)
+    ) {
+      void handleStandardCommand(
+        this.standardTarget(),
+        message.command,
+        message.message,
+      ).then((answer) => {
+        if (message.callback) {
+          this.sendTo(message.from, message.command, answer, message.callback);
+        }
+      });
+      return;
+    }
     if (!message?.callback) {
       return;
     }
@@ -1469,6 +1487,109 @@ class Easee extends Adapter {
           );
         });
     }
+  }
+
+  /** What the standard commands (src/lib/standard.ts) need: the chargers and the control and config writes */
+  standardTarget(): StandardTarget {
+    const coded = (text: string, code: string): Error =>
+      Object.assign(new Error(text), { code });
+    const bluetooth = async (
+      serial: string,
+      write: () => Promise<void>,
+    ): Promise<void> => {
+      // the guards of handleBluetoothStateChange, but the error goes to the caller
+      if (!this.bluetoothConnections.get(serial)) {
+        throw coded(
+          `Bluetooth charger ${serial} is not connected`,
+          "NOT_CONNECTED",
+        );
+      }
+      if (this.bluetoothManualScanInFlight) {
+        throw coded("A Bluetooth search is in progress; retry later", "BUSY");
+      }
+      this.bluetoothWritesInFlight += 1;
+      await this.updateBluetoothSearchReadiness();
+      try {
+        await write();
+      } finally {
+        this.bluetoothWritesInFlight -= 1;
+        await this.updateBluetoothSearchReadiness();
+      }
+    };
+    const write = (val: ioBroker.StateValue): ioBroker.State => ({
+      val,
+      ack: false,
+      ts: Date.now(),
+      lc: Date.now(),
+      from: "",
+    });
+    const cloud = (): void => {
+      if (this.unloading || !this.accessToken) {
+        throw coded("Not connected to the Easee Cloud", "NOT_CONNECTED");
+      }
+    };
+    return {
+      chargers: async () =>
+        Promise.all(
+          this.chargerIds.map(async (id) => {
+            const name = await this.getStateAsync(`${id}.name`);
+            const text = typeof name?.val === "string" ? name.val : "";
+            return { id, name: text || id };
+          }),
+        ),
+      // on: resume a paused charger (op mode 4; by Bluetooth always), else start; off: pause (resumable)
+      charge: async (id, on) => {
+        const bt = this.connectionMode === "bluetooth";
+        const opMode = (await this.getStateAsync(`${id}.status.chargerOpMode`))
+          ?.val;
+        const key = !on ? "pause" : bt || opMode === 4 ? "resume" : "start";
+        if (bt) {
+          const stateId = `${this.namespace}.${id}.control.${key}`;
+          await bluetooth(id, () =>
+            this.handleBluetoothControlWrite(stateId, id, key, write(true)),
+          );
+          return;
+        }
+        cloud();
+        if (key === "pause") {
+          await this.pauseCharging(id);
+        } else if (key === "resume") {
+          await this.resumeCharging(id);
+        } else {
+          await this.startCharging(id);
+        }
+        await this.setStateAsync(`${id}.control.${key}`, {
+          val: true,
+          ack: true,
+        });
+      },
+      // as a write of config.dynamicChargerCurrent, but a refusal of the Cloud goes to the caller
+      setCurrent: async (id, amps) => {
+        if (this.connectionMode === "bluetooth") {
+          const stateId = `${this.namespace}.${id}.config.dynamicChargerCurrent`;
+          await bluetooth(id, () =>
+            this.handleBluetoothConfigWrite(
+              stateId,
+              id,
+              "dynamicChargerCurrent",
+              write(amps),
+            ),
+          );
+          return;
+        }
+        cloud();
+        await axios.post(
+          `${apiUrl}/api/chargers/${encodeURIComponent(id)}/settings`,
+          { dynamicChargerCurrent: amps },
+          {
+            headers: { Authorization: `Bearer ${this.accessToken}` },
+            timeout: apiRequestTimeout,
+          },
+        );
+        this.log.info(`Charging current of charger ${id} set to ${amps} A`);
+      },
+      warn: (text) => this.log.warn(text),
+    };
   }
 
   async runBluetoothManualScan(): Promise<{ result?: string; error?: string }> {

@@ -3050,3 +3050,138 @@ describe("Easee polling regressions", () => {
     });
   });
 });
+
+describe("Standard commands (vehicle.*)", () => {
+  afterEach(() => sinon.restore());
+
+  /** onMessage with a callback; resolves with the answer */
+  function ask(
+    adapter: ReturnType<typeof createAdapterHarness>,
+    command: string,
+    message: Record<string, unknown>,
+  ): Promise<unknown> {
+    return new Promise((resolve) => {
+      adapter.sendTo = (_from: string, _command: string, answer: unknown) =>
+        resolve(answer);
+      adapter.onMessage({ command, message, from: "x", callback: {} });
+    });
+  }
+
+  function cloudCharger(
+    opMode: number | null,
+  ): ReturnType<typeof createAdapterHarness> {
+    const adapter = createAdapterHarness();
+    adapter.chargerIds = ["EH1"];
+    adapter.accessToken = "token";
+    adapter.getStateAsync = sinon
+      .stub()
+      .callsFake((id: string) =>
+        Promise.resolve(
+          id === "EH1.name"
+            ? { val: "Garage" }
+            : id === "EH1.status.chargerOpMode"
+              ? { val: opMode }
+              : null,
+        ),
+      );
+    adapter.startCharging = sinon.stub().resolves();
+    adapter.resumeCharging = sinon.stub().resolves();
+    adapter.pauseCharging = sinon.stub().resolves();
+    return adapter;
+  }
+
+  it("charge resumes a paused charger, else starts; off pauses", async () => {
+    const paused = cloudCharger(4);
+    expect(await ask(paused, "charge", { on: true })).to.deep.equal({
+      ok: true,
+    });
+    expect(paused.resumeCharging.calledOnceWith("EH1")).to.equal(true);
+    expect(
+      paused.setStateAsync.calledWith("EH1.control.resume", {
+        val: true,
+        ack: true,
+      }),
+    ).to.equal(true);
+
+    const waiting = cloudCharger(2);
+    await ask(waiting, "charge", { vehicle: "garage", on: true });
+    expect(waiting.startCharging.calledOnceWith("EH1")).to.equal(true);
+
+    const charging = cloudCharger(3);
+    charging.sendTo = sinon.stub();
+    charging.onMessage({
+      command: "charge",
+      message: { on: false },
+      from: "x",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(charging.pauseCharging.calledOnceWith("EH1")).to.equal(true);
+    expect(charging.sendTo.called).to.equal(false);
+  });
+
+  it("setChargeCurrent posts dynamicChargerCurrent and answers a refusal", async () => {
+    const adapter = cloudCharger(3);
+    const post = sinon.stub(axios, "post").resolves({ data: {} });
+    expect(await ask(adapter, "setChargeCurrent", { amps: 16 })).to.deep.equal({
+      ok: true,
+    });
+    expect(post.firstCall.args[0]).to.equal(
+      "https://api.easee.com/api/chargers/EH1/settings",
+    );
+    expect(post.firstCall.args[1]).to.deep.equal({ dynamicChargerCurrent: 16 });
+
+    post.rejects(new Error("Request failed with status code 400"));
+    expect(await ask(adapter, "setChargeCurrent", { amps: 99 })).to.deep.equal({
+      error: "Request failed with status code 400",
+      reason: "COMMAND_FAILED",
+    });
+  });
+
+  it("answers NOT_CONNECTED without a Cloud login", async () => {
+    const adapter = cloudCharger(4);
+    adapter.accessToken = "";
+    const answer = (await ask(adapter, "charge", { on: true })) as {
+      reason: string;
+    };
+    expect(answer.reason).to.equal("NOT_CONNECTED");
+    expect(adapter.resumeCharging.called).to.equal(false);
+  });
+
+  it("uses the Bluetooth control and config writes in Bluetooth mode", async () => {
+    const adapter = cloudCharger(3);
+    adapter.connectionMode = "bluetooth";
+    adapter.bluetoothConnections = new Map([["EH1", true]]);
+    adapter.bluetoothManualScanInFlight = false;
+    adapter.bluetoothWritesInFlight = 0;
+    adapter.updateBluetoothSearchReadiness = sinon.stub().resolves();
+    adapter.handleBluetoothControlWrite = sinon.stub().resolves();
+    adapter.handleBluetoothConfigWrite = sinon.stub().resolves();
+
+    expect(await ask(adapter, "charge", { on: false })).to.deep.equal({
+      ok: true,
+    });
+    const [id, serial, key, state] =
+      adapter.handleBluetoothControlWrite.firstCall.args;
+    expect([id, serial, key, state.val, state.ack]).to.deep.equal([
+      "easee.0.EH1.control.pause",
+      "EH1",
+      "pause",
+      true,
+      false,
+    ]);
+    await ask(adapter, "setChargeCurrent", { amps: 10 });
+    const config = adapter.handleBluetoothConfigWrite.firstCall.args;
+    expect([config[0], config[2], config[3].val]).to.deep.equal([
+      "easee.0.EH1.config.dynamicChargerCurrent",
+      "dynamicChargerCurrent",
+      10,
+    ]);
+    expect(adapter.bluetoothWritesInFlight).to.equal(0);
+
+    adapter.bluetoothConnections.set("EH1", false);
+    const offline = (await ask(adapter, "charge", { on: true })) as {
+      reason: string;
+    };
+    expect(offline.reason).to.equal("NOT_CONNECTED");
+  });
+});

@@ -88,6 +88,15 @@ requests.
 agents (e.g. pi-agent) and script authors: `{ help, commands }`, where
 `commands` lists every message with `write: true` if it changes something.
 
+The adapter also answers the standard commands of the shared catalog for
+vehicles, where a wallbox counts as a vehicle (marked with `standard` in the
+`help` answer): `getVehicles` (the chargers), `charge {vehicle?, on}` (on
+resumes a paused charger or starts charging, off pauses) and
+`setChargeCurrent {vehicle?, amps}` (`config.dynamicChargerCurrent`).
+`vehicle` is the serial number or the name of the charger (default the only
+one). They answer `{ok: true}`, `{ok: true, pending: true}` (after 14 s) or
+`{error, reason}`, in the Cloud and in the Bluetooth mode.
+
 ## Credits
 
 This adapter would not have been possible without the great work of @Newan (https://github.com/Newan), who developed former releases of this adapter.
@@ -97,6 +106,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (@GermanBluefox) Added the standard commands of the shared catalog: vehicle.getVehicles, vehicle.charge, vehicle.setChargeCurrent
+
 ### 4.1.1 (2026-11-22)
 - (@GermanBluefox) Added the message "help": a description of all messages for AI agents (e.g. pi-agent), and common.supportedMessages.help
 
