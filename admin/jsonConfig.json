@@ -52,27 +52,25 @@
                     "xl": 12,
                     "hidden": "data.connectionMode !== 'bluetooth'"
                 },
-                "username": {
+                "_legacyCredentialsWarning": {
                     "newLine": true,
-                    "type": "text",
-                    "xs": 12,
-                    "sm": 6,
-                    "md": 6,
-                    "lg": 6,
-                    "xl": 6,
-                    "label": "Username",
-                    "help": "username to access Easee cloud",
-                    "hidden": "data.connectionMode !== 'cloud'"
+                    "type": "infoBox",
+                    "boxType": "warning",
+                    "closeable": false,
+                    "text": "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.",
+                    "hidden": "data.connectionMode !== 'cloud' || !!data.credentialId || (data.username === '+49' && !data.client_secret) || (!data.username && !data.client_secret)"
                 },
-                "client_secret": {
-                    "type": "password",
+                "credentialId": {
+                    "newLine": true,
+                    "type": "credential",
+                    "credentialType": "custom",
                     "xs": 12,
-                    "sm": 6,
-                    "md": 6,
-                    "lg": 6,
-                    "xl": 6,
-                    "label": "Password",
-                    "help": "password of Easee cloud",
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12,
+                    "label": "Easee Cloud credentials",
+                    "help": "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.",
                     "hidden": "data.connectionMode !== 'cloud'"
                 },
                 "_Headline3": {

@@ -1,4 +1,7 @@
 {
+    "Easee Cloud credentials": "Облікові дані Easee Cloud",
+    "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.": "Додайте тут кнопкою + або в налаштуваннях Admin → Облікові дані користувацькі дані з логіном і паролем, а потім виберіть їх.",
+    "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.": "Попередні облікові дані Easee Cloud не перенесено автоматично. Додайте тут кнопкою + або в налаштуваннях Admin → Облікові дані користувацькі дані з логіном і паролем. Старі значення зберігатимуться до першого успішного входу в Cloud.",
     "API settings": "Налаштування API",
     "Account settings": "Налаштування аккаунта",
     "Automatic": "Автоматично",

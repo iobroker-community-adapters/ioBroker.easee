@@ -1,4 +1,7 @@
 {
+    "Easee Cloud credentials": "Easee Cloud 凭据",
+    "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.": "可在此处点击 +，或在 Admin 设置 → 凭据中添加自定义用户名/密码凭据，然后选择它。",
+    "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.": "旧的 Easee Cloud 凭据不会自动迁移。请在此处点击 +，或在 Admin 设置 → 凭据中添加自定义用户名/密码凭据。旧值会保留到首次成功登录 Cloud 后再清除。",
     "API settings": "API设置",
     "Account settings": "帐号设定",
     "Automatic": "自动",

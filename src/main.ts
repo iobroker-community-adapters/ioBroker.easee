@@ -1,6 +1,6 @@
 "use strict";
 
-import { Adapter, I18n } from "@iobroker/adapter-core";
+import { Adapter, Credentials, I18n } from "@iobroker/adapter-core";
 import { isDeepStrictEqual } from "node:util";
 import {
   EaseeBluetoothDeviceManagement,
@@ -74,6 +74,11 @@ const bluetoothOnlyInstanceStateIds = new Set([
 ]);
 const bluetoothUnsupportedSessionStateSuffix =
   /^session\.(?:\d{1,4}\.total_year|\d{1,4}\.\d{1,2}\.(?:totalEnergyUsage|totalCost))$/;
+
+interface EaseeCloudCredentials {
+  username: string;
+  password: string;
+}
 
 interface Charger {
   id: string;
@@ -1033,6 +1038,97 @@ class Easee extends Adapter {
     this.i18nInitialized = true;
   }
 
+  private hasLegacyCloudCredentials(): boolean {
+    return (
+      (typeof this.config.username === "string" &&
+        this.config.username !== "" &&
+        this.config.username !== "+49") ||
+      (typeof this.config.client_secret === "string" &&
+        this.config.client_secret !== "")
+    );
+  }
+
+  private async resolveCloudCredentials(): Promise<EaseeCloudCredentials | null> {
+    const credentialId = this.config.credentialId;
+    if (typeof credentialId !== "string" || !credentialId) {
+      if (this.hasLegacyCloudCredentials()) {
+        this.log.warn(
+          "Legacy Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button in this adapter's Connection settings or under Admin Settings → Credentials, then select it.",
+        );
+      } else {
+        this.log.error(
+          "Add or select a Custom login/password credential with the + button in this adapter's Connection settings.",
+        );
+      }
+      return null;
+    }
+
+    try {
+      const credential =
+        await Credentials.getCredentials<Credentials.LoginPasswordCredentials>(
+          this,
+          credentialId,
+        );
+      if (
+        typeof credential.values.login !== "string" ||
+        !credential.values.login.trim() ||
+        typeof credential.values.password !== "string" ||
+        !credential.values.password
+      ) {
+        throw new Error("The selected credential has no login and password");
+      }
+      return {
+        username: credential.values.login,
+        password: credential.values.password,
+      };
+    } catch {
+      this.log.error(
+        "Could not read the selected Easee Cloud credentials. Check Admin Settings → Credentials and the credential selected in this adapter's settings.",
+      );
+      return null;
+    }
+  }
+
+  private async clearLegacyCloudCredentials(): Promise<void> {
+    if (!this.hasLegacyCloudCredentials()) {
+      return;
+    }
+
+    const id = `system.adapter.${this.namespace}`;
+    try {
+      const instance = await this.getForeignObjectAsync(id);
+      if (
+        !isRecord(instance) ||
+        !isRecord(instance.native) ||
+        instance.native.credentialId !== this.config.credentialId
+      ) {
+        this.log.warn(
+          "Legacy Easee Cloud credentials were retained because the selected credential changed during startup.",
+        );
+        return;
+      }
+
+      await this.extendForeignObjectAsync(id, {
+        native: { username: "", client_secret: "" },
+      });
+      const saved = await this.getForeignObjectAsync(id);
+      if (
+        !isRecord(saved) ||
+        !isRecord(saved.native) ||
+        saved.native.username !== "" ||
+        saved.native.client_secret !== ""
+      ) {
+        throw new Error("Legacy Easee Cloud credentials were not cleared");
+      }
+      delete (this.config as Record<string, unknown>).username;
+      delete (this.config as Record<string, unknown>).client_secret;
+    } catch {
+      this.log.warn(
+        "Legacy Easee Cloud credentials could not be cleared from the adapter configuration. They remain stored; remove them from the adapter instance settings after confirming the central credentials are saved.",
+      );
+    }
+  }
+
   async onReady(): Promise<void> {
     //initial Status melden
     await this.setStateAsync("info.connection", false, true);
@@ -1070,32 +1166,28 @@ class Easee extends Adapter {
     }
 
     this.configurePollInterval();
-    // Testen ob der Login funktioniert
-    if (this.config.username == "" || this.config.username == "+49") {
-      this.log.error("No username set");
-    } else if (this.config.client_secret == "") {
-      this.log.error("No password set");
-    } else {
-      this.log.debug("Api login started");
-      const login = await this.login(
-        this.config.username,
-        this.config.client_secret,
-      );
-      if (login) {
-        await this.ensureLastUpdateObject();
+    const credentials = await this.resolveCloudCredentials();
+    if (!credentials) {
+      return;
+    }
 
-        //reset all to start
-        this.chargerIds = [];
+    this.log.debug("Api login started");
+    const login = await this.login(credentials.username, credentials.password);
+    if (login) {
+      await this.clearLegacyCloudCredentials();
+      await this.ensureLastUpdateObject();
 
-        if (this.config.signalR) {
-          this.log.info("Starting SignalR");
-          this.startSignal().catch((error) =>
-            this.log.warn(`SignalR start failed (${errorType(error)}).`),
-          );
-        }
-        // Start polling without delaying SignalR on a slow API response.
-        await this.runCloudPoll();
+      //reset all to start
+      this.chargerIds = [];
+
+      if (this.config.signalR) {
+        this.log.info("Starting SignalR");
+        this.startSignal().catch((error) =>
+          this.log.warn(`SignalR start failed (${errorType(error)}).`),
+        );
       }
+      // Start polling without delaying SignalR on a slow API response.
+      await this.runCloudPoll();
     }
   }
 

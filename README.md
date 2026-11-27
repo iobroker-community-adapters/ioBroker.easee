@@ -21,7 +21,7 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 - Node.js 22.19.0 or newer
 - ioBroker js-controller 7.2.2 or newer
-- ioBroker Admin 7.7.22 or newer
+- ioBroker Admin 7.9.0 or newer
 
 ## Help
 
@@ -29,13 +29,19 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 Cloud is the default connection mode. Choose **Easee Cloud** or
 **Bluetooth (local)** in the adapter settings. Cloud mode uses your Easee
-account. Bluetooth mode connects directly to chargers configured in the
-Device Manager on the Connection tab. Use it to add, edit, and remove local
-chargers; Bluetooth mode does not log in to Cloud or switch to Cloud
-automatically. Enter each charger's serial number and Bluetooth PIN (not
-your Easee account password), then save the settings and restart the adapter.
-An optional name is only an ioBroker label. The PIN is stored encrypted in the
-adapter configuration.
+account. In the adapter's Connection settings, click the **+** next to Easee
+Cloud credentials to add a **Custom login/password** credential directly. You
+can also add one under **Admin Settings → Credentials**. Select it, save the
+settings, and restart the adapter. Existing Easee Cloud credentials are
+not migrated automatically; re-enter them in the central Credentials settings.
+The old adapter-config values are kept until the first successful Cloud login,
+then cleared. Bluetooth mode connects directly to
+chargers configured in the Device Manager on the Connection tab. Use it to add,
+edit, and remove local chargers; Bluetooth mode does not log in to Cloud or
+switch to Cloud automatically. Enter each charger's serial number and Bluetooth
+PIN (not your Easee account password), then save the settings and restart the
+adapter. An optional name is only an ioBroker label. The PIN is stored
+encrypted in the adapter configuration.
 
 The charger must be in Bluetooth range and available for a local connection.
 The **Advanced Bluetooth functions** tab shows Bluetooth status and
@@ -97,6 +103,9 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (Voodoo2man) Migrated Easee Cloud login settings to central Credentials; existing users must re-enter them once.
+
 ### 4.1.1 (2026-11-22)
 - (@GermanBluefox) Added the message "help": a description of all messages for AI agents (e.g. pi-agent), and common.supportedMessages.help
 
