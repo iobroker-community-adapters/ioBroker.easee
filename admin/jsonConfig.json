@@ -65,10 +65,14 @@
                     "type": "credential",
                     "credentialType": "custom",
                     "xs": 12,
-                    "sm": 12,
-                    "md": 12,
-                    "lg": 12,
-                    "xl": 12,
+                    "sm": 6,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "style": {
+                        "width": "50%",
+                        "maxWidth": "50%"
+                    },
                     "label": "Easee Cloud credentials",
                     "help": "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.",
                     "hidden": "data.connectionMode !== 'cloud'"
