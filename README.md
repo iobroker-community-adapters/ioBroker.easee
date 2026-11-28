@@ -21,7 +21,7 @@ Adapter to connect [Easee Wallboxes](https://easee.com/).
 
 - Node.js 22.19.0 or newer
 - ioBroker js-controller 7.2.2 or newer
-- ioBroker Admin 7.9.0 or newer
+- ioBroker Admin 8.3.15 or newer
 
 ## Help
 
@@ -105,6 +105,7 @@ This adapter would not have been possible without the great work of @Newan (http
 -->
 ### **WORK IN PROGRESS**
 - (Voodoo2man) Migrated Easee Cloud login settings to central Credentials; existing users must re-enter them once.
+- (Voodoo2man) Raised the minimum supported Admin version to 8.3.15.
 
 ### 4.1.1 (2026-11-22)
 - (@GermanBluefox) Added the message "help": a description of all messages for AI agents (e.g. pi-agent), and common.supportedMessages.help
