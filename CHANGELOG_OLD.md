@@ -1,4 +1,9 @@
 # Older changes
+## 3.2.0 (2026-11-07)
+- (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
+- (Voodoo2man) Replaced the adapter icon.
+- (Voodoo2man) Added an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.
+
 ## 3.1.0 (2026-11-01)
 - (Voodoo2man) Corrected cable-lock status reporting and improved the reliability of charger status updates.
 - (Voodoo2man) Added a readable and adjustable permanent cable-lock setting, kept separate from the actual cable-lock status.

@@ -7,8 +7,21 @@
       "help": true
     },
     "nogit": true,
-    "version": "4.1.1",
+    "version": "4.1.2",
     "news": {
+      "4.1.2": {
+        "en": "Migrated Easee Cloud login settings to central Credentials; existing users must re-enter them once.\nRaised the minimum supported Admin version to 8.3.15.",
+        "de": "Easee Cloud-Logins auf Central Credentials migriert; alte Nutzer müssen sie erneut eingeben.\nAdmin-Mindestversion auf 8.3.15 erhöht.",
+        "ru": "Настройки входа в Easee Cloud перенесены в центральные учетные данные; существующим пользователям необходимо повторно ввести их один раз.\nМинимальная поддерживаемая версия Admin увеличена до 8.3.15.",
+        "pt": "Migrou o login do Easee Cloud para as credenciais centrais; os usuários devem reinseri-las uma vez.\nAumentou a versão mínima do Admin para 8.3.15.",
+        "nl": "De aanmeldingsinstellingen van Easee Cloud zijn gemigreerd naar centrale inloggegevens; bestaande gebruikers moeten deze eenmaal opnieuw invoeren.\nDe minimaal ondersteunde Admin-versie is verhoogd naar 8.3.15.",
+        "fr": "Les paramètres de connexion d'Easee Cloud ont été centralisés ; les utilisateurs existants doivent les saisir à nouveau.\nLa version admin minimale supportée est passée à 8.3.15.",
+        "it": "Easee Cloud ha migrato le credenziali centrali; gli utenti esistenti devono reinserirle.\nAumentata la versione Admin minima supportata a 8.3.15.",
+        "es": "Migró los ajustes de inicio de sesión de Easee Cloud a las credenciales centrales; los usuarios deben volver a introducirlos\nAumentó la versión mínima de Admin admitida a 8.3.15.",
+        "pl": "Przemigrowane ustawienia logowania Easee Cloud do centralnych danych uwierzytelniających; istniejący użytkownicy muszą je raz ponownie wprowadzić.\nPodniesiono minimalną obsługiwaną wersję administratora do 8.3.15.",
+        "uk": "Перенесено налаштування входу в Easee Cloud до центральних облікових даних; існуючі користувачі повинні повторно ввести їх один раз.\nПіднято мінімальну підтримувану версію адміністратора до 8.3.15.",
+        "zh-cn": "将 Easee Cloud 登录设置迁移到中央凭据；现有用户必须重新输入一次。\n将支持的最低管理员版本提高到 8.3.15。"
+      },
       "4.1.1": {
         "en": "Added the message \"help\": a description of all messages for AI agents (e.g. pi-agent), and common.supportedMessages.help",
         "de": "Nachricht „help“ hinzugefügt: Beschreibung aller Nachrichten für KI-Agenten (z. B. pi-agent) und common.supportedMessages.Help",
@@ -86,19 +99,6 @@
         "pl": "Poprawiono raportowanie stanu blokady kabla i poprawiono niezawodność aktualizacji stanu ładowarki.\nDodano czytelne i regulowane ustawienie stałej blokady kabla, oddzielone od rzeczywistego stanu blokady kabla.\nUlepszone odzyskiwanie aktualizacji ładowarki na żywo po przerwach w połączeniu przy zachowaniu regularnych aktualizacji statusu, gdy aktualizacje na żywo są wyłączone.",
         "uk": "Виправлено повідомлення про стан блокування кабелю та покращено надійність оновлення статусу зарядного пристрою.\nДодано читабельне та регульоване постійне налаштування блокування кабелю, відокремлене від фактичного статусу блокування кабелю.\nПокращено відновлення оновлень живого зарядного пристрою після переривання підключення, зберігаючи регулярні оновлення статусу, коли оновлення в реальному часі вимкнено.",
         "zh-cn": "更正了电缆锁定状态报告，提高了充电器状态更新的可靠性。\n增加了可读且可调节的永久电缆锁定设置，与实际的电缆锁定状态分开。\n改善了连接中断后带电充电器更新的恢复，同时在禁用实时更新时保持定期状态更新。"
-      },
-      "3.0.0": {
-        "en": "Migrated the adapter to TypeScript; Node.js 22.19.0 or newer is required\nUpdated adapter tooling, Admin configuration, and runtime metadata",
-        "de": "Adapter auf TypeScript migriert; Node.js 22.19.0 oder neuer nötig\nAdapter-Tools, Admin-Konfiguration und Runtime-Metadaten aktualisiert",
-        "ru": "Адаптер перенесен на TypeScript; требуется Node.js 22.19.0 или новее\nОбновленные инструменты адаптера, конфигурация администратора и метаданные времени выполнения",
-        "pt": "Migrou o adaptador para o TypeScript; requer Node.js 22.19.0 ou maior\nAdaptador, configuração Admin e metadados de tempo de execução atualizados",
-        "nl": "De adapter is overgezet naar TypeScript; Node.js 22.19.0 of nieuwer is vereist\nBijgewerkte adapterhulpmiddelen, beheerdersconfiguratie en runtime-metagegevens",
-        "fr": "L'adaptateur a migré vers TypeScript ; Node.js 22.19.0 ou plus récent est requis\nOutils d'adaptation, configuration admin et métadonnées d'exécution mis à jour",
-        "it": "È migrato l'adattatore a TypeScript; è richiesto Node.js 22.19.0 o più\nAdapter, configurazione admin e metadati di runtime aggiornati",
-        "es": "Migró el adaptador a TypeScript; se necesita Node.js 22.19.0 o más\nSe actualizaron los adaptadores, la configuración de administración y los metadatos",
-        "pl": "Przeniesiono adapter do TypeScript; wymagany jest plik Node.js 22.19.0 lub nowszy\nZaktualizowano oprzyrządowanie adaptera, konfigurację administratora i metadane środowiska wykonawczego",
-        "uk": "Перемістив адаптер на TypeScript; потрібен Node.js 22.19.0 або новіший\nОновлені інструменти адаптера, конфігурація адміністратора та метадані виконання",
-        "zh-cn": "已将适配器迁移到 TypeScript；需要 Node.js 22.19.0 或更高版本\n更新了适配器工具、管理员配置和运行时元数据"
       }
     },
     "titleLang": {

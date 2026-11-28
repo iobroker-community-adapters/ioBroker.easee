@@ -103,7 +103,7 @@ This adapter would not have been possible without the great work of @Newan (http
   Placeholder for the next version (at the beginning of the line):
   ### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 4.1.2 (2026-11-28)
 - (Voodoo2man) Migrated Easee Cloud login settings to central Credentials; existing users must re-enter them once.
 - (Voodoo2man) Raised the minimum supported Admin version to 8.3.15.
 
@@ -121,11 +121,6 @@ This adapter would not have been possible without the great work of @Newan (http
 ### 4.0.0 (2026-11-10)
 - (Voodoo2man) Added optional local Bluetooth connectivity alongside Cloud, with charger discovery and setup through the Device Manager.
 - (Voodoo2man) Improved Cloud status and session updates, charger controls, and Bluetooth charger configuration saving.
-
-### 3.2.0 (2026-11-07)
-- (Voodoo2man) Added the ability to change the charger name through the writable `<chargerId>.name` state.
-- (Voodoo2man) Replaced the adapter icon.
-- (Voodoo2man) Added an authorization token datapoint that is cleared when charging starts and set after the session, with a separate owner-name datapoint.
 
 [Older changelogs can be found there](CHANGELOG_OLD.md)
 
