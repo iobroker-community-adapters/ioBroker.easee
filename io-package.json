@@ -161,7 +161,7 @@
     ],
     "globalDependencies": [
       {
-        "admin": ">=7.7.22"
+        "admin": ">=8.3.15"
       }
     ]
   },
@@ -177,6 +177,7 @@
     "bluetoothBinding": "auto",
     "username": "+49",
     "client_secret": "",
+    "credentialId": "",
     "polltime": 30,
     "sessionPollMode": "auto",
     "sessionPollInterval": 60,

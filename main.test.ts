@@ -19,6 +19,8 @@ interface ModuleLoader {
 const moduleLoader = Module as unknown as ModuleLoader;
 const originalLoad = moduleLoader._load;
 let nobleScannerFactoryOverride: (() => Promise<unknown>) | undefined;
+let credentialsGetterOverride:
+  ((adapter: unknown, id: string) => Promise<unknown>) | undefined;
 moduleLoader._load = function (
   request: string,
   parent: NodeModule | undefined,
@@ -35,6 +37,12 @@ moduleLoader._load = function (
               text.replace("%s", arg === null ? "null" : String(arg)),
             key,
           ),
+      },
+      Credentials: {
+        getCredentials: (adapter: unknown, id: string) =>
+          credentialsGetterOverride
+            ? credentialsGetterOverride(adapter, id)
+            : Promise.reject(new Error("Credential test stub not configured")),
       },
     };
   }
@@ -175,6 +183,58 @@ function createBluetoothStartupHarness(): ReturnType<typeof createAdapter> {
   adapter.scheduleBluetoothPoll = sinon.stub();
   adapter.scheduleBluetoothReconnect = sinon.stub();
   return adapter;
+}
+
+function createCloudStartupHarness(): {
+  adapter: ReturnType<typeof createAdapter>;
+  instance: {
+    _id: string;
+    type: string;
+    common: Record<string, unknown>;
+    native: Record<string, unknown>;
+  };
+} {
+  const adapter = createAdapterHarness();
+  adapter.config = {
+    connectionMode: "cloud",
+    credentialId: "system.credentials.easee",
+    username: "legacy-user",
+    client_secret: "legacy-password",
+    polltime: 30,
+    signalR: false,
+  };
+  adapter.initializeI18n = sinon.stub().resolves();
+  adapter.reconcileModeSpecificObjects = sinon.stub().resolves();
+  adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+  adapter.configureSessionPolling = sinon.stub();
+  adapter.configurePollInterval = sinon.stub();
+  adapter.getStateAsync = sinon.stub().resolves(null);
+  adapter.login = sinon.stub().resolves(true);
+  adapter.ensureLastUpdateObject = sinon.stub().resolves();
+  adapter.runCloudPoll = sinon.stub().resolves();
+
+  const instance = {
+    _id: "system.adapter.easee.0",
+    type: "instance",
+    common: {},
+    native: {
+      credentialId: "system.credentials.easee",
+      username: "legacy-user",
+      client_secret: "legacy-password",
+      polltime: 30,
+      bluetoothChargerList: [
+        { serialNumber: "EMX12345", pin: "encrypted-pin" },
+      ],
+    },
+  };
+  adapter.getForeignObjectAsync = sinon.stub().resolves(instance);
+  adapter.extendForeignObjectAsync = sinon
+    .stub()
+    .callsFake((_id: string, object: { native: Record<string, unknown> }) => {
+      Object.assign(instance.native, object.native);
+      return Promise.resolve();
+    });
+  return { adapter, instance };
 }
 
 function attachObjectStore(
@@ -3048,5 +3108,96 @@ describe("Easee polling regressions", () => {
       expect(setObjectNotExistsAsync.called).to.equal(false);
       expect(adapter.log.warn.calledOnce).to.equal(true);
     });
+  });
+});
+
+describe("Cloud credential migration", () => {
+  afterEach(() => {
+    credentialsGetterOverride = undefined;
+    sinon.restore();
+  });
+
+  it("requires central re-entry and preserves legacy values when no credential is selected", async () => {
+    const { adapter, instance } = createCloudStartupHarness();
+    adapter.config.credentialId = "";
+
+    await adapter.onReady();
+
+    expect(adapter.login.called).to.equal(false);
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(instance.native.username).to.equal("legacy-user");
+    expect(instance.native.client_secret).to.equal("legacy-password");
+    const logs = JSON.stringify({
+      warn: adapter.log.warn.args,
+      error: adapter.log.error.args,
+    });
+    expect(logs).to.include("Admin Settings → Credentials");
+    expect(logs).to.include("not migrated automatically");
+    expect(logs).not.to.include("legacy-user");
+    expect(logs).not.to.include("legacy-password");
+  });
+
+  it("preserves legacy values if the selected central credential cannot be read", async () => {
+    const { adapter, instance } = createCloudStartupHarness();
+    credentialsGetterOverride = () =>
+      Promise.reject(new Error("credential storage unavailable"));
+
+    await adapter.onReady();
+
+    expect(adapter.login.called).to.equal(false);
+    expect(adapter.getForeignObjectAsync.called).to.equal(false);
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(instance.native.username).to.equal("legacy-user");
+    expect(instance.native.client_secret).to.equal("legacy-password");
+    expect(JSON.stringify(adapter.log.error.args)).not.to.include(
+      "legacy-password",
+    );
+  });
+
+  it("uses central credentials and clears only legacy Cloud fields after login succeeds", async () => {
+    const { adapter, instance } = createCloudStartupHarness();
+    credentialsGetterOverride = (_target, id) => {
+      expect(id).to.equal("system.credentials.easee");
+      return Promise.resolve({
+        values: { login: "central-user", password: "central-password" },
+      });
+    };
+
+    await adapter.onReady();
+
+    expect(
+      adapter.login.calledOnceWithExactly("central-user", "central-password"),
+    ).to.equal(true);
+    expect(adapter.extendForeignObjectAsync.calledOnce).to.equal(true);
+    expect(
+      adapter.extendForeignObjectAsync.calledAfter(adapter.login),
+    ).to.equal(true);
+    expect(adapter.extendForeignObjectAsync.firstCall.args).to.deep.equal([
+      "system.adapter.easee.0",
+      { native: { username: "", client_secret: "" } },
+    ]);
+    expect(instance.native.username).to.equal("");
+    expect(instance.native.client_secret).to.equal("");
+    expect(instance.native.polltime).to.equal(30);
+    expect(instance.native.bluetoothChargerList).to.deep.equal([
+      { serialNumber: "EMX12345", pin: "encrypted-pin" },
+    ]);
+    expect(adapter.config.username).to.equal(undefined);
+    expect(adapter.config.client_secret).to.equal(undefined);
+  });
+
+  it("keeps legacy values when the central credentials fail Cloud login", async () => {
+    const { adapter, instance } = createCloudStartupHarness();
+    adapter.login.resolves(false);
+    credentialsGetterOverride = () =>
+      Promise.resolve({
+        values: { login: "central-user", password: "central-password" },
+      });
+
+    await adapter.onReady();
+
+    expect(adapter.extendForeignObjectAsync.called).to.equal(false);
+    expect(instance.native.username).to.equal("legacy-user");
+    expect(instance.native.client_secret).to.equal("legacy-password");
   });
 });

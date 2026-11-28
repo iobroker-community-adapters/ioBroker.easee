@@ -1,4 +1,7 @@
 {
+    "Easee Cloud credentials": "Easee-Cloud-Zugangsdaten",
+    "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.": "Fügen Sie hier über + oder unter Admin-Einstellungen → Zugangsdaten einen benutzerdefinierten Login-/Passwort-Eintrag hinzu und wählen Sie ihn aus.",
+    "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.": "Ihre bisherigen Easee-Cloud-Zugangsdaten wurden nicht automatisch migriert. Fügen Sie hier über + oder unter Admin-Einstellungen → Zugangsdaten einen benutzerdefinierten Login-/Passwort-Eintrag hinzu. Die alten Werte bleiben bis zur ersten erfolgreichen Cloud-Anmeldung gespeichert.",
     "API settings": "API-Einstellungen",
     "Account settings": "Account Einstellungen",
     "Automatic": "Automatisch",

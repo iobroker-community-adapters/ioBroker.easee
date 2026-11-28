@@ -48,6 +48,8 @@ interface AdminConfigItem {
   oid?: string;
   showProcess?: boolean;
   timeout?: number;
+  credentialType?: string;
+  disableCreation?: boolean;
   items?: Record<string, AdminConfigItem>;
 }
 
@@ -296,7 +298,17 @@ describe("manual Bluetooth search", () => {
     expect(connection.type).to.equal("panel");
     expect(connection.label).to.equal("Connection");
     expect(connection.items.connectionMode.label).to.equal("Connection mode");
-    expect(connectionItems).to.have.property("username");
+    expect(connectionItems.credentialId.type).to.equal("credential");
+    expect(connectionItems.credentialId.credentialType).to.equal("custom");
+    expect(connectionItems.credentialId).not.to.have.property(
+      "disableCreation",
+    );
+    expect(connectionItems._legacyCredentialsWarning.type).to.equal("infoBox");
+    expect(connectionItems._legacyCredentialsWarning.hidden).to.include(
+      "!!data.credentialId",
+    );
+    expect(connectionItems).not.to.have.property("username");
+    expect(connectionItems).not.to.have.property("client_secret");
     expect(connectionItems).to.have.property("polltime");
     expect(connectionItems).to.have.property("_bluetoothInfo");
     expect(connectionItems).to.have.property("_bluetoothDeviceManager");
@@ -406,6 +418,9 @@ describe("manual Bluetooth search", () => {
       "Found %s possible Easee chargers.",
       "Device name not available.",
       "And %s more.",
+      "Easee Cloud credentials",
+      "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.",
+      "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.",
     ];
 
     for (const language of languages) {

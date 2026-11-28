@@ -1,4 +1,7 @@
 {
+    "Easee Cloud credentials": "Easee Cloud credentials",
+    "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.": "Add a Custom login/password credential with the + button here or under Admin Settings → Credentials, then select it.",
+    "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.": "Your previous Easee Cloud credentials were not migrated automatically. Add a Custom login/password credential with the + button here or under Admin Settings → Credentials. Legacy values are kept until the first successful Cloud login.",
     "API settings": "API settings",
     "Account settings": "Account settings",
     "Automatic": "Automatic",
